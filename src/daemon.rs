@@ -10,10 +10,10 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::proto::{self, ALPN, Member, Msg, Ticket};
-use crate::room::{self, Invite, RoomEvent, RoomHandle};
+use crate::room::{self, Invite, RoomEvent, RoomHandle, RoomState};
 use crate::state::{NetStatus, Network, State, home};
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
@@ -356,7 +356,7 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             }
             Ok(still_member)
         }
-        Msg::RoomInvite { room_id, topic, turn_budget, participants } => {
+        Msg::RoomInvite { room_id, topic, turn_budget, participants, .. } => {
             if is_live_member(shared, peer, tx) {
                 on_invite(shared, peer, room_id, topic, turn_budget, participants);
             }
@@ -420,7 +420,7 @@ fn on_invite(shared: &Arc<Shared>, peer: &str, room_id: String, topic: String, t
 fn start_joiner(shared: &Arc<Shared>, invite: Invite) {
     let (tx, rx) = mpsc::channel(64);
     let id = invite.room_id.clone();
-    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: invite.topic.clone(), role: "joined", tx });
+    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: invite.topic.clone(), role: "joined", tx, state: None });
     let shared = shared.clone();
     tokio::spawn(async move {
         if let Err(e) = room::run_joiner(shared.clone(), invite, rx).await {
@@ -492,8 +492,8 @@ async fn serve_control(shared: Arc<Shared>, stream: tokio::net::TcpStream, token
     let req: Request = serde_json::from_str(&line).context("malformed control request")?;
     let resp = if req.token != token {
         Response { ok: false, text: "wrong control token".into() }
-    } else if req.cmd == "discuss" {
-        match discuss(&shared, &req).await {
+    } else if ["discuss", "wait", "say"].contains(&req.cmd.as_str()) {
+        match waiting_command(&shared, &req).await {
             Ok(text) => Response { ok: true, text },
             Err(e) => Response { ok: false, text: e.to_string() },
         }
@@ -621,13 +621,6 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             shared.send_to(&invite.from, Msg::RoomDecline { room_id: id.clone(), reason: "declined by the user".into() });
             Ok(format!("Declined room {id}."))
         }
-        "say" => {
-            let id = arg("room")?;
-            let rooms = shared.rooms.lock().unwrap();
-            let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
-            room.tx.try_send(RoomEvent::Human(arg("text")?)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
-            Ok("Sent.".into())
-        }
         "panic" => {
             let rooms = shared.rooms.lock().unwrap();
             for room in rooms.values() {
@@ -641,13 +634,76 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     }
 }
 
-/// Opens a room and waits until it closes. Returns the result for the human.
+/// Commands that wait for something to happen in a room.
+async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
+    let arg = |k: &str| req.args.get(k).cloned().ok_or_else(|| anyhow!("missing argument: {k}"));
+    match req.cmd.as_str() {
+        "discuss" => discuss(shared, req).await,
+        "wait" => {
+            let id = arg("room")?;
+            let state = shared.rooms.lock().unwrap().get(&id).and_then(|r| r.state.clone());
+            match state {
+                Some(rx) => wait_room(&id, rx).await,
+                None => {
+                    let dir = room::room_dir(&id);
+                    std::fs::read_to_string(dir.join("closing.md"))
+                        .or_else(|_| std::fs::read_to_string(dir.join("result.md")))
+                        .map_err(|_| anyhow!("no room {id} with a result on this machine"))
+                }
+            }
+        }
+        "say" => {
+            let id = arg("room")?;
+            let extra: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(0);
+            let (tx, state) = {
+                let rooms = shared.rooms.lock().unwrap();
+                let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
+                (room.tx.clone(), room.state.clone())
+            };
+            tx.try_send(RoomEvent::Human(arg("text")?, extra)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
+            // If the room was waiting for this answer, return once it runs again,
+            // so a following `agora wait` does not see the old question.
+            if let Some(mut state) = state {
+                let paused = matches!(*state.borrow(), RoomState::Paused(_));
+                if paused {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), state.changed()).await;
+                }
+            }
+            Ok("Sent.".into())
+        }
+        other => bail!("unknown command: {other}"),
+    }
+}
+
+/// Waits until a room opened here pauses for a human or closes.
+async fn wait_room(id: &str, mut rx: watch::Receiver<RoomState>) -> Result<String> {
+    loop {
+        let state = rx.borrow_and_update().clone();
+        match state {
+            RoomState::Running => {
+                if rx.changed().await.is_err() {
+                    bail!("room {id} ended without a result");
+                }
+            }
+            RoomState::Paused(question) => {
+                return Ok(format!(
+                    "[room {id} is paused: a human has to decide]\n{question}\n\nAnswer with `agora say {id} \"<answer>\"` (add `--turns N` to grant more turns), then run `agora wait {id}` for the result."
+                ));
+            }
+            RoomState::Closed(Ok(text)) => return Ok(text),
+            RoomState::Closed(Err(e)) => bail!("{e}"),
+        }
+    }
+}
+
+/// Opens a room and waits until it pauses or closes. Returns the text for the human.
 async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let topic = req.args.get("topic").cloned().ok_or_else(|| anyhow!("missing topic"))?;
     let turns: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(6);
     if !(1..=30).contains(&turns) {
         bail!("turns must be between 1 and 30");
     }
+    let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(1_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
     {
@@ -674,11 +730,17 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     }
     let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
     let (tx, rx) = mpsc::channel(64);
-    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: topic.clone(), role: "opened", tx });
+    let (state_tx, state_rx) = watch::channel(RoomState::Running);
+    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: topic.clone(), role: "opened", tx, state: Some(state_rx.clone()) });
     eprintln!("room {id} opened: {topic}");
-    let result = room::run_opener(shared.clone(), id.clone(), topic, joiners, turns, rx).await;
-    shared.rooms.lock().unwrap().remove(&id);
-    result
+    // The room outlives this request: it may pause for a human and go on later.
+    let (sh, rid) = (shared.clone(), id.clone());
+    tokio::spawn(async move {
+        let result = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, rx, state_tx.clone()).await;
+        let _ = state_tx.send(RoomState::Closed(result.map_err(|e| e.to_string())));
+        sh.rooms.lock().unwrap().remove(&rid);
+    });
+    wait_room(&id, state_rx).await
 }
 
 fn rooms(shared: &Shared) -> String {

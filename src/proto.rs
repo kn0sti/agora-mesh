@@ -34,14 +34,31 @@ pub enum Msg {
     Heartbeat,
     /// Opener to joiner: start a fresh session for this topic.
     #[serde(rename = "ROOM_INVITE")]
-    RoomInvite { room_id: String, topic: String, turn_budget: u32, participants: Vec<Participant> },
+    RoomInvite {
+        room_id: String,
+        topic: String,
+        turn_budget: u32,
+        #[serde(default)]
+        token_budget: u64,
+        participants: Vec<Participant>,
+    },
     #[serde(rename = "ROOM_JOIN")]
     RoomJoin { room_id: String },
     #[serde(rename = "ROOM_DECLINE")]
     RoomDecline { room_id: String, reason: String },
     /// Joiner to opener: a contribution that has no number yet.
     #[serde(rename = "SAY")]
-    Say { room_id: String, kind: String, text: String },
+    /// `tokens` is what the joiner's session has used in this room so far;
+    /// `extra_turns` lets a human grant every peer more turns.
+    Say {
+        room_id: String,
+        kind: String,
+        text: String,
+        #[serde(default)]
+        tokens: u64,
+        #[serde(default)]
+        extra_turns: u32,
+    },
     /// Opener to joiners: a numbered contribution. `next` names who speaks now.
     #[serde(rename = "DISCUSS_MSG")]
     Discuss { room_id: String, seq: u32, from: String, from_name: String, kind: String, text: String, turns_left: u32, next: Option<String> },

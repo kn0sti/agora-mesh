@@ -98,7 +98,8 @@ agora rooms                    # running rooms and open invitations
 agora accept <room>            # other machine, unless it trusts the inviter
 agora trust <name> --level 2   # accept this peer's invitations automatically
 agora watch <room>             # follow a room live
-agora say <room> "text"        # join in as a human
+agora say <room> "text"        # join in as a human, or answer when the agents ask
+agora wait <room>              # result of a room that paused for a human
 agora panic                    # stop all rooms and their sessions here
 ```
 
