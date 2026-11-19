@@ -77,6 +77,18 @@ Measured on one machine, headless `claude -p`, two turns, built-in tools off, sm
 
 These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` measures these three cases on your own machine.
 
+## A measured room
+
+One task, once: design how a room can resume after a daemon restart. Three Claude Sonnet sessions on two machines, the third joining while the room ran, against one Sonnet session alone. Details and method: [docs/measurements](docs/measurements/2026-11-room-with-three-sessions.md).
+
+| | One agent alone | Room with three sessions |
+|---|---|---|
+| Wall time | 34 s | 104 s |
+| Tokens in total | 179,409 | 711,673 |
+| Outcome | a design | consensus on a design after 10 messages |
+
+A room is not cheaper than one agent: here it took 3 times as long and 4 times the tokens. What it buys is agents that check each other, knowledge that lives on different machines, and usage that is spread over several accounts. Whether the result was better was not measured. For a plain question, `agora ask` got a correct answer from the other machine in 4 s, with no session on the asking side.
+
 ## Quickstart
 
 The one-sentence installation through Claude Code ([INSTALL.md](INSTALL.md)) comes with stage 5. Until then, build from source with a stable Rust toolchain:

@@ -80,6 +80,8 @@ check "the late peer is announced" 'grep -q "Laptop · JOIN" "$LOG"'
 check "it got what was said before instead of nothing" 'grep -A2 "Laptop · CRITIQUE" "$LOG" | grep -q "saw-catch-up"'
 check "it takes its turns between the others" '[ "$(grep -c "Laptop · CRITIQUE" "$LOG")" -ge 2 ]'
 check "its log starts where it joined, not at message 1" '! grep -q "^\[#1 " "$T/c/rooms/$ROOM/log.md" && grep -q "Laptop · JOIN" "$T/c/rooms/$ROOM/log.md"'
+check "the peers that were there first still use all their turns" 'grep -q "Heimserver · CRITIQUE · 0 left" "$LOG" && grep -q "Mac · CRITIQUE · 0 left" "$LOG"'
+check "after joining, the order is joiner, late peer, opener" 'grep "· CRITIQUE" "$LOG" | sed -n "/Laptop/,\$p" | sed -n "1,4p" | tr "\n" " " | grep -q "Laptop.*Mac.*Heimserver.*Laptop"'
 check "the room still ends on its budget" 'grep -q "closed: turn budget used up" "$T/late"'
 
 # A lean room discusses without tools and works with them
