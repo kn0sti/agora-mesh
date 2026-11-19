@@ -37,6 +37,18 @@ check "third peer appears as a join request, not as a member" 'wait_for 30 "a st
 a reject Fremd >/dev/null
 check "rejected peer drops the network" 'wait_for 15 "! c status | grep -q \"waiting for approval\""'
 
+# A member list that is out of date does not undo a revocation.
+c join "$TICKET" >/dev/null
+wait_for 30 'a status | grep -q "join request: \"Fremd\""'; a approve Fremd >/dev/null
+check "three peers know each other" 'wait_for 30 "b status | grep -q \"Fremd *online\" && c status | grep -q \"Heimserver *online\""'
+b stop >/dev/null
+a revoke Fremd >/dev/null
+check "the revoking peer no longer lists the revoked one" '! a status | grep -q Fremd'
+b status >/dev/null
+check "a peer that was away does not bring the revoked one back" 'wait_for 40 "a status | grep -q \"Heimserver *online\"" && sleep 3 && ! a status | grep -q Fremd'
+check "and takes over the newer list itself" 'wait_for 20 "! b status | grep -q Fremd"'
+check "the revoked peer is out of the network" 'wait_for 30 "! c status | grep -q \"network .* peer\""'
+
 a revoke Heimserver >/dev/null
 check "revoked peer is gone on the revoking side" '! a status | grep -q Heimserver'
 check "revoked peer drops the network itself" 'wait_for 15 "! b status | grep -q \"Mac\""'

@@ -2,6 +2,10 @@
 name = "agora"
 version = "0.1.0"
 edition = "2024"
+description = "Symmetric peer-to-peer mesh for Claude Code: agents on several machines plan, split work and share memory as equals"
+license = "MIT"
+repository = "https://github.com/kn0sti/agora-mesh"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.104"

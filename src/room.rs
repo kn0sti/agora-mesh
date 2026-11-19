@@ -3,7 +3,7 @@
 //! The opener's daemon numbers the messages and says who speaks next. That is
 //! ordering, not authority: after the briefing all participants take equal turns.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -54,6 +54,23 @@ pub struct RoomHandle {
     pub tx: mpsc::Sender<RoomEvent>,
     /// Only rooms opened on this machine report their state here.
     pub state: Option<watch::Receiver<RoomState>>,
+    /// Set to true to stop the room's sessions, also in the middle of a turn.
+    pub cancel: watch::Sender<bool>,
+    /// For a room joined here: the peer that opened it.
+    pub from: Option<String>,
+}
+
+/// Returns when the room is told to stop.
+async fn stopped(cancel: &mut watch::Receiver<bool>) {
+    if cancel.wait_for(|stop| *stop).await.is_err() {
+        // Nobody can stop it any more: never return.
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Kinds a discussion session writes itself, so it need not be told them again.
+fn own_words(kind: &str) -> bool {
+    matches!(kind, "BRIEF" | "ANSWER" | "PROPOSAL" | "CRITIQUE" | "QUESTION" | "SPLIT_WORK" | "PASS" | "CONSENSUS" | "NEED_HUMAN")
 }
 
 /// An invitation that waits for `agora accept`.
@@ -105,6 +122,12 @@ fn render(e: &Entry) -> String {
     }
 }
 
+/// Room ids are generated locally as hex; one from a peer must look the same
+/// before it is used in a path.
+pub fn valid_room_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 pub fn room_dir(room_id: &str) -> PathBuf {
     home().join("rooms").join(room_id)
 }
@@ -120,7 +143,10 @@ fn append(dir: &Path, file: &str, text: &str) {
 
 /// A headless Claude Code process that is fed one user message per turn.
 struct Session {
-    _child: Child,
+    child: Child,
+    cancel: watch::Receiver<bool>,
+    /// Set once the process was killed; its output can no longer be trusted.
+    dead: bool,
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
     turns: u32,
@@ -133,6 +159,12 @@ struct Session {
     timeout: Duration,
     /// Time spent waiting for the model.
     busy: Duration,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 /// The session's turn failed because the account is at its usage limit.
@@ -200,7 +232,7 @@ fn claude_command() -> Command {
 }
 
 impl Session {
-    fn start(dir: &Path, me: &str, others: &str, rights: &str) -> Result<Session> {
+    fn start(dir: &Path, me: &str, others: &str, rights: &str, cancel: watch::Receiver<bool>) -> Result<Session> {
         let rules = format!(
             "You are \"{me}\", one of several equal peers in an agora-mesh room. The other peers ({others}) are \
 Claude Code agents on other machines with their own files and knowledge; a human may read along. \
@@ -234,10 +266,14 @@ A room starts with a short briefing; during it you are told which first line to 
         if let Ok(extra) = std::env::var("AGORA_CLAUDE_ARGS") {
             cmd.args(extra.split_whitespace());
         }
-        Self::spawn(cmd, dir)
+        Self::spawn(cmd, dir, cancel)
     }
 
-    fn spawn(mut cmd: Command, dir: &Path) -> Result<Session> {
+    fn spawn(mut cmd: Command, dir: &Path, cancel: watch::Receiver<bool>) -> Result<Session> {
+        // Its own process group, so that stopping the session also stops the
+        // commands it is running.
+        #[cfg(unix)]
+        cmd.process_group(0);
         let mut child = cmd
             .current_dir(dir)
             .stdin(Stdio::piped())
@@ -248,51 +284,100 @@ A room starts with a short briefing; during it you are told which first line to 
             .map_err(|e| anyhow!("could not start claude: {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        Ok(Session { _child: child, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT, busy: Duration::ZERO })
+        Ok(Session { child, cancel, dead: false, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT, busy: Duration::ZERO })
     }
 
-    /// Sends one user message and waits for the turn's final answer.
+    /// Sends one user message and waits for the turn's final answer. The turn
+    /// ends early when the room is stopped or the session takes too long; in
+    /// both cases the process is killed, because a late answer would be taken
+    /// for the answer to the next message.
     async fn turn(&mut self, text: &str) -> Result<String> {
+        if self.dead {
+            bail!("the Claude session has ended");
+        }
         let started = std::time::Instant::now();
         let msg = serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
         self.stdin.write_all(format!("{msg}\n").as_bytes()).await?;
         self.stdin.flush().await?;
         let limit = self.timeout;
-        let answer = tokio::time::timeout(limit, async {
-            while let Some(line) = self.lines.next_line().await? {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-                if v["type"] == "rate_limit_event" {
-                    if let Some(c) = Capacity::from_event(&v["rate_limit_info"]) {
-                        self.capacity = Some(c);
-                    }
-                    continue;
-                }
-                if v["type"] != "result" {
-                    continue;
-                }
-                let u = &v["usage"];
-                let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                self.last_in = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
-                self.tokens_in += self.last_in;
-                self.tokens_out += n("output_tokens");
-                self.turns += 1;
-                let text = v["result"].as_str().unwrap_or("").to_string();
-                if v["is_error"].as_bool().unwrap_or(false) {
-                    if is_limit_error(&v, &text) {
-                        let resets_at = self.capacity.map(|c| c.resets_at).unwrap_or(0);
-                        self.capacity = Some(Capacity { utilization: 1.0, resets_at, limited: true });
-                        return Err(LimitReached.into());
-                    }
-                    bail!("the Claude session reported an error: {text}");
-                }
-                return Ok(text);
+        let mut cancel = self.cancel.clone();
+        enum End {
+            Answer(Result<String>),
+            TimedOut,
+            Stopped,
+        }
+        let end = {
+            let answer = self.read_answer();
+            tokio::pin!(answer);
+            tokio::select! {
+                r = tokio::time::timeout(limit, &mut answer) => match r {
+                    Ok(r) => End::Answer(r),
+                    Err(_) => End::TimedOut,
+                },
+                _ = stopped(&mut cancel) => End::Stopped,
             }
-            bail!("the Claude session ended unexpectedly")
-        })
-        .await
-        .map_err(|_| anyhow!("the Claude session did not answer within {} minutes", limit.as_secs() / 60))??;
+        };
         self.busy += started.elapsed();
-        Ok(answer)
+        match end {
+            End::Answer(r) => r,
+            End::TimedOut => {
+                self.kill();
+                bail!("the Claude session did not answer within {} minutes", limit.as_secs() / 60)
+            }
+            End::Stopped => {
+                self.kill();
+                bail!("stopped by `agora panic`")
+            }
+        }
+    }
+
+    /// Ends the session and everything it started.
+    fn kill(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.id() {
+            // A negative pid addresses the process group the session leads.
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.child.start_kill();
+        self.dead = true;
+    }
+
+    /// Reads the session's output up to the result of the current turn.
+    async fn read_answer(&mut self) -> Result<String> {
+        while let Some(line) = self.lines.next_line().await? {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            if v["type"] == "rate_limit_event" {
+                if let Some(c) = Capacity::from_event(&v["rate_limit_info"]) {
+                    self.capacity = Some(c);
+                }
+                continue;
+            }
+            if v["type"] != "result" {
+                continue;
+            }
+            let u = &v["usage"];
+            let n = |k: &str| u[k].as_u64().unwrap_or(0);
+            self.last_in = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+            self.tokens_in += self.last_in;
+            self.tokens_out += n("output_tokens");
+            self.turns += 1;
+            let text = v["result"].as_str().unwrap_or("").to_string();
+            if v["is_error"].as_bool().unwrap_or(false) {
+                if is_limit_error(&v, &text) {
+                    let resets_at = self.capacity.map(|c| c.resets_at).unwrap_or(0);
+                    self.capacity = Some(Capacity { utilization: 1.0, resets_at, limited: true });
+                    return Err(LimitReached.into());
+                }
+                bail!("the Claude session reported an error: {text}");
+            }
+            return Ok(text);
+        }
+        self.dead = true;
+        bail!("the Claude session ended unexpectedly")
     }
 
     fn tokens(&self) -> u64 {
@@ -345,7 +430,8 @@ pub async fn bench() -> Result<String> {
         let mut cmd = claude_command();
         cmd.args(["--model", "haiku", "--no-session-persistence"]);
         cmd.args(args);
-        let mut s = Session::spawn(cmd, &dir)?;
+        let (_keep, never) = watch::channel(false);
+        let mut s = Session::spawn(cmd, &dir, never)?;
         s.turn("Reply with only the word: one").await?;
         // Connectors finish loading after the first turn; the second turn shows the real cost.
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -402,6 +488,9 @@ struct Opener {
     /// Text of the agreed SPLIT_WORK message.
     plan: String,
     started: std::time::Instant,
+    /// Contributions and reports that arrived while our own session was busy.
+    deferred: VecDeque<RoomEvent>,
+    cancel: watch::Receiver<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -434,6 +523,7 @@ pub async fn run_opener(
     project: Option<(String, PathBuf)>,
     rx: mpsc::Receiver<RoomEvent>,
     state: watch::Sender<RoomState>,
+    cancel: watch::Receiver<bool>,
 ) -> Result<String> {
     let started = std::time::Instant::now();
     let me = Participant { id: shared.me.clone(), name: shared.state.lock().unwrap().name.clone() };
@@ -441,6 +531,10 @@ pub async fn run_opener(
     let dir = room_dir(&room_id);
     std::fs::create_dir_all(&dir)?;
     append(&dir, "log.md", &format!("# Room {room_id}\n\nTopic: {topic}\n"));
+    // Who took part: only these peers may ask for the result later.
+    for j in &joiners {
+        append(&dir, "members", &j.id);
+    }
 
     let mut participants = vec![me.clone()];
     participants.extend(joiners.iter().cloned());
@@ -455,7 +549,7 @@ pub async fn run_opener(
     // The session works in the project's clone; log and result stay in the room directory.
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
     // A lean room discusses without tools; see `work_turn` for the work phase.
-    let session = Session::start(&work_dir, &me.name, &others, if lean { "talk" } else { "full" })?;
+    let session = Session::start(&work_dir, &me.name, &others, if lean { "talk" } else { "full" }, cancel.clone())?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
     let notice_idx = shared.notices_len();
     let mut room = Opener {
@@ -490,6 +584,8 @@ pub async fn run_opener(
         others,
         plan: String::new(),
         started,
+        deferred: VecDeque::new(),
+        cancel,
     };
 
     let brief_topic = match &project {
@@ -533,13 +629,16 @@ and where relevant information can be found. This one message needs no kind on t
             .await?;
         let first = self.joiners[0].id.clone();
         self.publish(&self.me.clone(), "BRIEF", &brief, Some(first));
-        for i in 0..self.joiners.len() {
-            let j = self.joiners[i].clone();
+        // The peers that were invited at the start. One invited meanwhile is not briefed
+        // this way; it gets a summary when it joins.
+        let briefed = self.joiners.clone();
+        for i in 0..briefed.len() {
+            let j = briefed[i].clone();
             let (kind, text) = self.wait_say(&j.id).await?;
             if kind == "SKIP" {
                 bail!("{} left the room during the briefing", j.name);
             }
-            let next = self.joiners.get(i + 1).map(|n| n.id.clone()).unwrap_or_else(|| self.me.id.clone());
+            let next = briefed.get(i + 1).map(|n| n.id.clone()).unwrap_or_else(|| self.me.id.clone());
             self.publish(&j, "KNOWN_MISSING", &text, Some(next));
         }
         let fill = self.own_turn("Briefing, last step: fill the gaps the others named, as far as you can. First line: ANSWER. Do not propose or decide anything yet; the discussion starts after this message.").await?;
@@ -720,6 +819,14 @@ and where relevant information can be found. This one message needs no kind on t
                     self.reassign(&mut pkgs, i, "is at its usage limit");
                 }
             }
+            // A peer that left while our own session was busy still holds its running package.
+            for i in 0..pkgs.len() {
+                if pkgs[i].state == PkgState::Running && pkgs[i].owner != self.me.id && self.limited.contains(&pkgs[i].owner) {
+                    let gone = pkgs[i].owner.clone();
+                    self.assigned.remove(&gone);
+                    self.reassign(&mut pkgs, i, "left the room");
+                }
+            }
             // Start one package per idle peer.
             let mut mine = None;
             for i in 0..pkgs.len() {
@@ -799,7 +906,7 @@ and where relevant information can be found. This one message needs no kind on t
             return self.own_turn(prompt).await;
         }
         if self.work_session.is_none() {
-            self.work_session = Some(Session::start(&self.work_dir, &self.me.name, &self.others, "full")?);
+            self.work_session = Some(Session::start(&self.work_dir, &self.me.name, &self.others, "full", self.cancel.clone())?);
         }
         let ws = self.work_session.as_mut().unwrap();
         ws.timeout = WORK_TIMEOUT;
@@ -846,7 +953,17 @@ and where relevant information can be found. This one message needs no kind on t
     async fn wait_report(&mut self) -> Result<(String, u32, String, String)> {
         let gone = self.limited.len();
         loop {
-            let ev = tokio::time::timeout(WORK_TIMEOUT, self.rx.recv()).await.map_err(|_| anyhow!("a peer did not report on its package within {} minutes", WORK_TIMEOUT.as_secs() / 60))?;
+            // Longer than a peer's own limit for a package, so that its report arrives first.
+            let ev = match self.next_event(WORK_TIMEOUT + Duration::from_secs(300)).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    // Whoever still owes a report drops out; its package goes to someone else.
+                    for id in self.assigned.keys().cloned().collect::<Vec<_>>() {
+                        self.drop_peer(&id, "did not report on its package in time");
+                    }
+                    return Ok((String::new(), 0, "SKIP".to_string(), String::new()));
+                }
+            };
             match ev {
                 Some(RoomEvent::Remote(p, Msg::Say { kind, text, tokens, package: Some(id), n, .. })) if kind != "HUMAN" => {
                     if !self.fresh(&p, n) {
@@ -876,10 +993,22 @@ and where relevant information can be found. This one message needs no kind on t
         (0..order.len()).map(|k| &order[(start + k) % order.len()]).find(|p| self.budget[&p.id] > 0).cloned()
     }
 
+    /// Gives every peer still in the room more turns.
     fn grant(&mut self, turns: u32) {
-        for left in self.budget.values_mut() {
-            *left += turns;
+        for (id, left) in self.budget.iter_mut() {
+            if !self.limited.contains(id) {
+                *left = left.saturating_add(turns.min(100));
+            }
         }
+    }
+
+    /// The next event: one that was set aside while our session was busy, or
+    /// one from the room's queue. `Err` when nothing arrives in time.
+    async fn next_event(&mut self, wait: Duration) -> Result<Option<RoomEvent>, tokio::time::error::Elapsed> {
+        if let Some(ev) = self.deferred.pop_front() {
+            return Ok(Some(ev));
+        }
+        tokio::time::timeout(wait, self.rx.recv()).await
     }
 
     /// Waits for a human after NEED_HUMAN. True if one answered and the room goes on.
@@ -887,7 +1016,7 @@ and where relevant information can be found. This one message needs no kind on t
         let _ = self.state.send(RoomState::Paused(format!("{} asks: {question}", asker.name)));
         crate::daemon::event("room-paused", &format!("{}: {} asks a human (agora say {} \"<answer>\")", self.room_id, asker.name, self.room_id));
         loop {
-            let ev = match tokio::time::timeout(PAUSE_TIMEOUT, self.rx.recv()).await {
+            let ev = match self.next_event(PAUSE_TIMEOUT).await {
                 Ok(ev) => ev,
                 Err(_) => {
                     let _ = self.state.send(RoomState::Running);
@@ -942,7 +1071,7 @@ and where relevant information can be found. This one message needs no kind on t
             if left.is_zero() {
                 bail!("the invited peers did not join within {}s; they may need to run `agora accept {}`", JOIN_TIMEOUT.as_secs(), self.room_id);
             }
-            let ev = match tokio::time::timeout(left.min(Duration::from_secs(10)), self.rx.recv()).await {
+            let ev = match self.next_event(left.min(Duration::from_secs(10))).await {
                 Ok(ev) => ev,
                 Err(_) => {
                     // An invitation or its answer may have been lost with a link: ask again.
@@ -990,7 +1119,7 @@ and where relevant information can be found. This one message needs no kind on t
     /// Takes a turn with our own session: new messages since its last turn, then `ask`.
     async fn own_turn(&mut self, ask: &str) -> Result<String> {
         self.drain()?;
-        let mut news: String = self.log[self.seen..].iter().filter(|e| e.from != self.me.id || e.kind == "HUMAN").map(render).collect::<Vec<_>>().join("\n");
+        let mut news: String = self.log[self.seen..].iter().filter(|e| e.kind != "TURN" && !(e.from == self.me.id && own_words(&e.kind))).map(render).collect::<Vec<_>>().join("\n");
         self.seen = self.log.len();
         news = format!("{}{news}", memory_notes(&self.shared, &mut self.notice_idx));
         let reply = self.session.turn(&format!("{news}\n{ask}")).await;
@@ -1006,7 +1135,13 @@ and where relevant information can be found. This one message needs no kind on t
     /// Handles events that arrived while our session was busy.
     fn drain(&mut self) -> Result<()> {
         while let Ok(ev) = self.rx.try_recv() {
-            self.side_event(ev)?;
+            // A contribution or a report belongs to whoever waits for it next.
+            // Everything else is handled now.
+            if matches!(&ev, RoomEvent::Remote(_, Msg::Say { kind, .. }) if kind != "HUMAN") {
+                self.deferred.push_back(ev);
+            } else {
+                self.side_event(ev)?;
+            }
         }
         Ok(())
     }
@@ -1065,6 +1200,7 @@ and where relevant information can be found. This one message needs no kind on t
                     self.budget.insert(new.id.clone(), self.turns);
                     self.joiners.push(new.clone());
                     self.arrivals.push(new.clone());
+                    append(&self.dir, "members", &new.id);
                     self.publish(&new, "JOIN", "joined the room.", None);
                 }
             }
@@ -1093,7 +1229,7 @@ and where relevant information can be found. This one message needs no kind on t
 
     async fn wait_say(&mut self, speaker: &str) -> Result<(String, String)> {
         loop {
-            let ev = match tokio::time::timeout(TURN_TIMEOUT, self.rx.recv()).await {
+            let ev = match self.next_event(TURN_TIMEOUT).await {
                 Ok(ev) => ev,
                 Err(_) => {
                     // A peer that does not answer drops out instead of ending the room.
@@ -1191,7 +1327,7 @@ pub async fn run_ask(
 // ------------------------------------------------------------------- joiner
 
 /// Takes part in a room another peer opened.
-pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Receiver<RoomEvent>) -> Result<()> {
+pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Receiver<RoomEvent>, cancel: watch::Receiver<bool>) -> Result<()> {
     let started = std::time::Instant::now();
     let me = shared.me.clone();
     let my_name = shared.state.lock().unwrap().name.clone();
@@ -1212,7 +1348,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     let has_clone = clone.is_some();
     let work_dir = clone.unwrap_or_else(|| dir.clone());
     let discuss_rights = if invite.lean { "talk" } else { invite.rights.as_str() };
-    let mut session = match Session::start(&work_dir, &my_name, &others, discuss_rights) {
+    let mut session = match Session::start(&work_dir, &my_name, &others, discuss_rights, cancel.clone()) {
         Ok(s) => s,
         Err(e) => {
             shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: e.to_string() });
@@ -1286,7 +1422,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
         match ev {
             // Back in touch with the opener: ask for what we missed, repeat what it may have missed.
             Some(RoomEvent::LinkUp(p)) if p == invite.from => {
-                shared.send_to(&invite.from, Msg::Resend { room_id: invite.room_id.clone(), from_seq: last_seq + 1 });
+                shared.send_to(&invite.from, Msg::Resend { room_id: invite.room_id.clone(), from_seq: last_seq.saturating_add(1) });
                 if let Some(m) = &pending {
                     shared.send_to(&invite.from, m.clone());
                 }
@@ -1295,8 +1431,8 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 if seq <= last_seq {
                     continue;
                 }
-                if seq > last_seq + 1 {
-                    shared.send_to(&invite.from, Msg::Resend { room_id: invite.room_id.clone(), from_seq: last_seq + 1 });
+                if seq > last_seq.saturating_add(1) {
+                    shared.send_to(&invite.from, Msg::Resend { room_id: invite.room_id.clone(), from_seq: last_seq.saturating_add(1) });
                     continue;
                 }
                 last_seq = seq;
@@ -1350,12 +1486,14 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
                 // In a lean room the discussion session has no tools; a second one does the work.
                 if invite.lean && work_session.is_none() {
-                    work_session = Session::start(&work_dir, &my_name, &others, &invite.rights).ok();
+                    work_session = Session::start(&work_dir, &my_name, &others, &invite.rights, cancel.clone()).ok();
                 }
+                // A peer that joined late and has not spoken yet still needs to know what was said.
+                let before = catch_up.take().map(|c| format!("You joined this room while it was running. What was said before you joined:\n{c}\n\n")).unwrap_or_default();
                 let prompt = if work_session.is_some() {
-                    format!("You take part in a room with {others}. The room agreed on this plan:\n{plan}\n\n{task}")
+                    format!("You take part in a room with {others}. {before}The room agreed on this plan:\n{plan}\n\n{task}")
                 } else {
-                    format!("{}\n{task}", news.iter().map(render).collect::<Vec<_>>().join("\n"))
+                    format!("{before}{}\n{task}", news.iter().map(render).collect::<Vec<_>>().join("\n"))
                 };
                 news.clear();
                 let worker = work_session.as_mut().unwrap_or(&mut session);
