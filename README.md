@@ -1,6 +1,6 @@
 # agora-mesh
 
-> **Status: early development.** Stages 1 and 2 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room and hand back a result. Work splitting, shared memory and the plugin are not built yet. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
+> **Status: early development.** Stages 1 to 3 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room, split the work, do it in parallel and hand back a result. Shared memory and the plugin are not built yet. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
 
 A symmetric peer-to-peer mesh for Claude Code. It connects the Claude Code CLI on two or more machines so that the agents on them can talk as equals: plan together, criticise each other's ideas, split large tasks, review each other's code and keep a shared memory.
 
@@ -106,7 +106,7 @@ agora stats                    # what the rooms cost
 agora bench                    # fixed context per turn on this machine
 ```
 
-Run `agora discuss` inside a git repository and the room is about that project: every peer that has registered a clone of it works in its own clone.
+Run `agora discuss` inside a git repository and the room is about that project: every peer that has registered a clone of it works in its own clone. If the agents agree on a split of the work, each does its package on its own branch `agora/<room>/<peer>`, and a package whose peer reaches its usage limit moves to a peer that has capacity left. `agora status` shows how much of its limit each peer has used.
 
 `agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` and `tests/e2e-rooms.sh` run the whole flow with local daemons; the second uses a scripted stand-in for Claude and costs no tokens.
 
@@ -117,7 +117,7 @@ Run `agora discuss` inside a git repository and the room is about that project: 
 | 0 ✓ | This repository and the design documents | all decisions are written down |
 | 1 ✓ | Network: daemon, keys, join with approval, permanent connection | two machines reconnect on their own after a restart |
 | 2 ✓ | Rooms: sessions without connectors, briefing, turn rules, watching and joining in | two agents present a plan they discussed |
-| 3 | Capacity: status, work splitting, takeover on a full limit, one git branch per peer, token display | a work package moves to the other peer on a full limit |
+| 3 ✓ | Capacity: status, work splitting, takeover on a full limit, one git branch per peer, token display | a work package moves to the other peer on a full limit |
 | 4 | Shared memory: live sync, importance levels, closing notes, Obsidian, block list | an entry from A is visible on B seconds later |
 | 5 | Plugin wrapper and prebuilt binaries for every platform | installation works with one sentence to Claude |
 | 6 | Release: measured numbers, legal check, public repository | |

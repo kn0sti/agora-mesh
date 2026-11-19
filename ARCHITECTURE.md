@@ -163,11 +163,17 @@ Usage instructions ship as a skill, which costs one line of context until it is 
 
 ## 8. Capacity bundling
 
-- Each peer reports `STATUS` with its capacity state.
-- `SPLIT_WORK` divides a task into packages assigned to peers, recorded on the board.
-- When a peer's session fails on a usage limit, its daemon reports `limited_until` and sends `HANDOVER` for its open packages. Another peer takes them over automatically and continues on the handed-over branch.
+**Capacity.** Claude Code prints a `rate_limit_event` with every turn: the utilization of the five-hour and the seven-day window and when each resets. The daemon keeps the tighter of the two as the peer's capacity, sends it to all peers as `STATUS` when it changes, and shows it in `agora status`. A peer counts as limited when the event's status is not `allowed`, when utilization reaches 97 % (`AGORA_LIMIT_AT`), or when a turn fails with a limit error.
 
-**Unverified (stage 3):** whether the daemon can read the remaining allowance and the reset time in advance, or only detects a session that fails on the limit.
+**Splitting.** A peer proposes a split with `SPLIT_WORK`, one line per package in the form `- <peer name>: <package>`. When all peers answer `CONSENSUS`, the room enters the work phase. A later plain `PROPOSAL` replaces the split.
+
+**Work phase.** Every package gets the branch `agora/<room>/<peer>`. The opener's daemon sends `WORK` to each owner; all peers work at the same time, one package per peer at a time, each in its own clone of the project. A session commits on its branch and pushes it if it may. It reports `DONE` or `BLOCKED` with a short summary. When all packages are reported, the opener's session writes the result for the human. The daemon does not run git itself, does not merge, and does not reserve files; one branch per peer is what keeps peers apart.
+
+**Takeover.** When a peer reaches its usage limit, in the work phase or before a package starts, the package goes to the peer with capacity that has the least to do (`HANDOVER`), together with the branch name; the taker fetches that branch and continues. If nobody has capacity left the package is reported as blocked. In the discussion a limited peer takes no further turns, and the room closes when fewer than two peers remain. If the opener's own session is limited, the overview is assembled from the log without a model.
+
+The token budget applies to the discussion only; work-phase tokens are counted in the statistics.
+
+**Unverified:** the wording and status of a real limit error. Utilization and reset time were read from real sessions; a full limit was only simulated in tests (status 429 and the usual phrases are accepted). Takeover between machines also needs the limited peer to have pushed its branch, which it cannot do once it is limited mid-turn.
 
 ## 9. Shared memory
 
@@ -190,7 +196,8 @@ Usage instructions ship as a skill, which costs one line of context until it is 
 | Point | Stage |
 |---|---|
 | NAT traversal between two real home networks | 1 |
-| Detecting a usage limit and its reset time | 3 |
+| Behaviour at a real usage limit (only simulated so far) | 3 |
+| Work phase and takeover with real sessions and a real repository | 3 |
 | Replication of the shared memory | 4 |
 | Plugin monitor and Windows behaviour in practice | 5 |
 | Original wording of Anthropic's terms on several accounts | 6 |

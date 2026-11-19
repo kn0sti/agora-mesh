@@ -61,7 +61,16 @@ pub enum Msg {
         tokens: u64,
         #[serde(default)]
         extra_turns: u32,
+        /// Set when the contribution reports on a work package.
+        #[serde(default)]
+        package: Option<u32>,
     },
+    /// Opener to joiner: work on this package now.
+    #[serde(rename = "WORK")]
+    Work { room_id: String, package: u32, title: String, branch: String, taken_from: Option<String> },
+    /// How much of its usage limit a peer has used.
+    #[serde(rename = "STATUS")]
+    Status { capacity: Capacity },
     /// Opener to joiners: a numbered contribution. `next` names who speaks now.
     #[serde(rename = "DISCUSS_MSG")]
     Discuss { room_id: String, seq: u32, from: String, from_name: String, kind: String, text: String, turns_left: u32, next: Option<String> },
@@ -73,6 +82,71 @@ pub enum Msg {
 pub struct Participant {
     pub id: String,
     pub name: String,
+}
+
+/// A peer's remaining capacity, read from the rate-limit information Claude Code
+/// prints with every turn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Capacity {
+    /// Used share of the tightest usage window, 0.0 to 1.0.
+    pub utilization: f32,
+    /// When that window resets, Unix seconds; 0 if unknown.
+    pub resets_at: u64,
+    pub limited: bool,
+}
+
+impl Capacity {
+    /// Reads `rate_limit_info` of a `rate_limit_event`.
+    pub fn from_event(info: &serde_json::Value) -> Option<Capacity> {
+        let status = info["status"].as_str()?;
+        let mut utilization = 0.0f32;
+        let mut resets_at = info["resetsAt"].as_u64().unwrap_or(0);
+        if let Some(windows) = info["unifiedWindows"].as_object() {
+            for w in windows.values() {
+                let u = w["utilization"].as_f64().unwrap_or(0.0) as f32;
+                if u > utilization {
+                    utilization = u;
+                    resets_at = w["resetsAt"].as_u64().unwrap_or(resets_at);
+                }
+            }
+        }
+        let threshold = std::env::var("AGORA_LIMIT_AT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.97);
+        Some(Capacity { utilization, resets_at, limited: !status.starts_with("allowed") || utilization >= threshold })
+    }
+
+    pub fn describe(&self) -> String {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let reset = if self.resets_at > now {
+            let m = (self.resets_at - now) / 60;
+            format!(", resets in {}h{:02}m", m / 60, m % 60)
+        } else {
+            String::new()
+        };
+        if self.limited {
+            format!("at its usage limit{reset}")
+        } else {
+            format!("{:.0} % of its limit used{reset}", self.utilization * 100.0)
+        }
+    }
+}
+
+/// Reads the packages of a SPLIT_WORK message: one line per package in the
+/// form `- <peer name>: <package>`. Returns the index into `names` and the title.
+pub fn parse_packages(text: &str, names: &[String]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(|c: char| c == '-' || c == '*' || c == '.' || c == ')' || c.is_ascii_digit() || c == ' ');
+        let Some((who, title)) = line.split_once(':') else { continue };
+        let who = who.trim().trim_matches(|c| c == '*' || c == '`' || c == '"').to_lowercase();
+        let title = title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        if let Some(i) = names.iter().position(|n| n.to_lowercase() == who) {
+            out.push((i, title.to_string()));
+        }
+    }
+    out
 }
 
 /// Kinds an agent may put on the first line of a contribution.
@@ -181,6 +255,25 @@ mod tests {
         assert_eq!(parse_kind("**need human**: decide\nplease", "PROPOSAL", &KINDS), ("NEED_HUMAN".into(), "decide\nplease".into()));
         assert_eq!(parse_kind("I think so", "PROPOSAL", &KINDS), ("PROPOSAL".into(), "I think so".into()));
         assert_eq!(parse_kind("CONSENSUS", "PROPOSAL", &["KNOWN_MISSING"]), ("PROPOSAL".into(), "CONSENSUS".into()));
+    }
+
+    #[test]
+    fn packages_are_read_from_split_work() {
+        let names = vec!["Mac".to_string(), "Heimserver".to_string()];
+        let text = "We split it:\n- Mac: backend API\n* **heimserver**: frontend\n2. Nobody: ignored\n- Mac:";
+        assert_eq!(parse_packages(text, &names), vec![(0, "backend API".to_string()), (1, "frontend".to_string())]);
+        assert!(parse_packages("no packages here", &names).is_empty());
+    }
+
+    #[test]
+    fn capacity_is_read_from_a_rate_limit_event() {
+        let info = serde_json::json!({"status": "allowed", "resetsAt": 10, "unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": 10}, "seven_day": {"utilization": 0.42, "resetsAt": 99}}});
+        assert_eq!(Capacity::from_event(&info), Some(Capacity { utilization: 0.42, resets_at: 99, limited: false }));
+        let full = serde_json::json!({"status": "rejected", "resetsAt": 10});
+        assert!(Capacity::from_event(&full).unwrap().limited);
+        let near = serde_json::json!({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.99, "resetsAt": 5}}});
+        assert!(Capacity::from_event(&near).unwrap().limited);
     }
 
     #[test]
