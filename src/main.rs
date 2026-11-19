@@ -72,7 +72,12 @@ enum Cmd {
         /// Turns per peer after the briefing
         #[arg(long, default_value = "6")]
         turns: String,
+        /// Token budget of the whole room, all peers together
+        #[arg(long, default_value = "1000000")]
+        tokens: String,
     },
+    /// Wait for the result of a room that paused for a human
+    Wait { room: String },
     /// List running rooms and open invitations
     Rooms,
     /// Accept a room invitation
@@ -80,7 +85,13 @@ enum Cmd {
     /// Decline a room invitation
     Decline { room: String },
     /// Say something in a running room as a human
-    Say { room: String, text: String },
+    Say {
+        room: String,
+        text: String,
+        /// Grant every peer this many more turns
+        #[arg(long, default_value = "0")]
+        turns: String,
+    },
     /// Follow a room's log
     Watch { room: String },
     /// Stop all rooms and their sessions on this machine
@@ -101,12 +112,13 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns } => call("discuss", &[("topic", topic), ("with", with), ("turns", turns)]),
+        Cmd::Discuss { topic, with, turns, tokens } => call("discuss", &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens)]),
+        Cmd::Wait { room } => call("wait", &[("room", room)]),
         Cmd::Trust { name, level, rights } => call("trust", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Rooms => call("rooms", &[]),
         Cmd::Accept { room } => call("accept", &[("room", room)]),
         Cmd::Decline { room } => call("decline", &[("room", room)]),
-        Cmd::Say { room, text } => call("say", &[("room", room), ("text", text)]),
+        Cmd::Say { room, text, turns } => call("say", &[("room", room), ("text", text), ("turns", turns)]),
         Cmd::Panic => call("panic", &[]),
         Cmd::Watch { room } => watch(&room),
     }

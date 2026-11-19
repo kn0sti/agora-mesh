@@ -84,6 +84,10 @@ Code stays in git. A room names its project by git remote URL; each peer resolve
 4. **Close.** The room closes when all participants have sent `CONSENSUS` for the same proposal hash, when all pass in one round, or when the budget is used up. Without consensus the opener's session writes an "agreed / disputed" overview and the room reports `NEED_HUMAN`.
 5. **Closing notes.** The opener's session writes the result and decisions to the shared memory (high importance), a summary as a note (normal), and the raw log to a local archive that expires after 30 days (low).
 
+`NEED_HUMAN` pauses the room. `agora discuss` returns with the question; a human on any participating machine answers with `agora say <room> "<answer>"`, optionally granting more turns with `--turns N`, and `agora wait <room>` returns the result. If nobody answers within an hour the room closes with the overview.
+
+Joiners report the tokens their session has used with every contribution. When the sum over all peers passes the room's token budget (default 1,000,000, `agora discuss --tokens`), the room closes with the overview.
+
 The opener's daemon assigns the message numbers. This is ordering, not authority. If it drops out, the room pauses until it returns.
 
 ### Token protection
@@ -186,8 +190,6 @@ Usage instructions ship as a skill, which costs one line of context until it is 
 | Point | Stage |
 |---|---|
 | NAT traversal between two real home networks | 1 |
-| Token budget per room (turn budget is enforced, tokens are only counted so far) | 3 |
-| Pausing a room on `NEED_HUMAN` and resuming it (it closes with an overview so far) | 3 |
 | Detecting a usage limit and its reset time | 3 |
 | Replication of the shared memory | 4 |
 | Plugin monitor and Windows behaviour in practice | 5 |

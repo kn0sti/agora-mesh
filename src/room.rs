@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::daemon::Shared;
 use crate::proto::{self, KINDS, Member, Msg, Participant};
@@ -20,17 +20,31 @@ use crate::state::home;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a room waits for a human after NEED_HUMAN before it closes.
+const PAUSE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 pub enum RoomEvent {
     Remote(String, Msg),
-    Human(String),
+    /// A human's message and the number of turns it grants every peer.
+    Human(String, u32),
     Panic,
+}
+
+/// What `agora discuss` and `agora wait` wait for.
+#[derive(Clone)]
+pub enum RoomState {
+    Running,
+    /// A peer sent NEED_HUMAN; holds the question.
+    Paused(String),
+    Closed(Result<String, String>),
 }
 
 pub struct RoomHandle {
     pub topic: String,
     pub role: &'static str,
     pub tx: mpsc::Sender<RoomEvent>,
+    /// Only rooms opened on this machine report their state here.
+    pub state: Option<watch::Receiver<RoomState>>,
 }
 
 /// An invitation that waits for `agora accept`.
@@ -159,6 +173,10 @@ A room starts with a short briefing; during it you are told which first line to 
         Ok(answer)
     }
 
+    fn tokens(&self) -> u64 {
+        self.tokens_in + self.tokens_out
+    }
+
     fn stats(&self) -> String {
         let per_turn = if self.turns > 0 { self.tokens_in / self.turns as u64 } else { 0 };
         format!("{} turns, {} input tokens ({} per turn), {} output tokens", self.turns, self.tokens_in, per_turn, self.tokens_out)
@@ -179,6 +197,10 @@ struct Opener {
     rx: mpsc::Receiver<RoomEvent>,
     session: Session,
     dir: PathBuf,
+    /// Tokens each joiner's session reported so far.
+    joiner_tokens: HashMap<String, u64>,
+    token_budget: u64,
+    state: watch::Sender<RoomState>,
 }
 
 /// Runs a room from invitation to result. Returns the text for the human who asked.
@@ -188,7 +210,9 @@ pub async fn run_opener(
     topic: String,
     joiners: Vec<Member>,
     turns: u32,
+    token_budget: u64,
     rx: mpsc::Receiver<RoomEvent>,
+    state: watch::Sender<RoomState>,
 ) -> Result<String> {
     let me = Participant { id: shared.me.clone(), name: shared.state.lock().unwrap().name.clone() };
     let joiners: Vec<Participant> = joiners.iter().map(|m| Participant { id: m.id.clone(), name: m.name.clone() }).collect();
@@ -199,7 +223,7 @@ pub async fn run_opener(
     let mut participants = vec![me.clone()];
     participants.extend(joiners.iter().cloned());
     for j in &joiners {
-        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, participants: participants.clone() };
+        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, token_budget, participants: participants.clone() };
         if !shared.send_to(&j.id, invite) {
             bail!("peer \"{}\" is offline", j.name);
         }
@@ -208,7 +232,7 @@ pub async fn run_opener(
     let others = joiners.iter().map(|j| j.name.as_str()).collect::<Vec<_>>().join(", ");
     let session = Session::start(&dir, &me.name, &others, "full")?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
-    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir };
+    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state };
 
     let outcome = room.run(&topic).await;
     let (reason, result) = match &outcome {
@@ -221,7 +245,11 @@ pub async fn run_opener(
     let stats = room.session.stats();
     append(&room.dir, "log.md", &format!("\n---\nClosed: {reason}. This peer: {stats}."));
     std::fs::write(room.dir.join("result.md"), &result)?;
-    outcome.map(|(reason, result)| format!("{result}\n\n[room {} closed: {reason}; {} messages; this peer: {stats}]", room.room_id, room.log.len()))
+    let total = room.total_tokens();
+    let closing = outcome.map(|(reason, result)| format!("{result}\n\n[room {} closed: {reason}; {} messages; this peer: {stats}; all peers: {total} tokens]", room.room_id, room.log.len()))?;
+    // What `agora wait` prints when it is asked after the room has closed.
+    std::fs::write(room.dir.join("closing.md"), &closing)?;
+    Ok(closing)
 }
 
 impl Opener {
@@ -273,9 +301,9 @@ and where relevant information can be found. This one message needs no kind on t
                 self.wait_say(&speaker.id).await?
             };
             *self.budget.get_mut(&speaker.id).unwrap() -= 1;
-            let next = (0..order.len()).map(|k| &order[(idx + k) % order.len()]).find(|p| self.budget[&p.id] > 0).map(|p| p.id.clone());
+            let next = self.next_speaker(&order, idx);
             last_kind.insert(speaker.id.clone(), kind.clone());
-            let done = if kind == "NEED_HUMAN" {
+            let mut done = if kind == "NEED_HUMAN" {
                 Some("a human has to decide")
             } else if order.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "CONSENSUS")) {
                 Some("consensus")
@@ -284,7 +312,15 @@ and where relevant information can be found. This one message needs no kind on t
             } else {
                 None
             };
+            if done.is_none() && self.total_tokens() > self.token_budget {
+                done = Some("token budget used up");
+            }
             self.publish(&speaker, &kind, &text, if done.is_some() { None } else { next });
+            // NEED_HUMAN pauses the room. It goes on when a human answers and
+            // closes with an overview when nobody does.
+            if kind == "NEED_HUMAN" && self.wait_human(&speaker, &text, &order, idx).await? {
+                continue;
+            }
             if let Some(reason) = done {
                 break reason;
             }
@@ -297,6 +333,54 @@ and where relevant information can be found. This one message needs no kind on t
         };
         let result = self.own_turn(ask).await?;
         Ok((reason.to_string(), result))
+    }
+
+    fn total_tokens(&self) -> u64 {
+        self.session.tokens() + self.joiner_tokens.values().sum::<u64>()
+    }
+
+    /// The first peer from position `idx` on that still has turns.
+    fn next_speaker(&self, order: &[Participant], idx: usize) -> Option<String> {
+        (0..order.len()).map(|k| &order[(idx + k) % order.len()]).find(|p| self.budget[&p.id] > 0).map(|p| p.id.clone())
+    }
+
+    fn grant(&mut self, turns: u32) {
+        for left in self.budget.values_mut() {
+            *left += turns;
+        }
+    }
+
+    /// Waits for a human after NEED_HUMAN. True if one answered and the room goes on.
+    async fn wait_human(&mut self, asker: &Participant, question: &str, order: &[Participant], idx: usize) -> Result<bool> {
+        let _ = self.state.send(RoomState::Paused(format!("{} asks: {question}", asker.name)));
+        loop {
+            let ev = match tokio::time::timeout(PAUSE_TIMEOUT, self.rx.recv()).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    let _ = self.state.send(RoomState::Running);
+                    return Ok(false);
+                }
+            };
+            let (who, text, extra) = match ev {
+                Some(RoomEvent::Human(text, extra)) => (self.me.clone(), text, extra),
+                Some(RoomEvent::Remote(p, Msg::Say { kind, text, extra_turns, .. })) if kind == "HUMAN" => {
+                    match self.joiners.iter().find(|j| j.id == p).cloned() {
+                        Some(j) => (j, text, extra_turns),
+                        None => continue,
+                    }
+                }
+                Some(other) => {
+                    self.side_event(other)?;
+                    continue;
+                }
+                None => bail!("room stopped"),
+            };
+            self.grant(extra);
+            let next = self.next_speaker(order, idx);
+            self.publish(&who, "HUMAN", &text, next);
+            let _ = self.state.send(RoomState::Running);
+            return Ok(true);
+        }
     }
 
     async fn wait_for_joins(&mut self) -> Result<()> {
@@ -365,12 +449,14 @@ and where relevant information can be found. This one message needs no kind on t
     /// Events that do not belong to the current speaker: humans joining in, stop.
     fn side_event(&mut self, ev: RoomEvent) -> Result<()> {
         match ev {
-            RoomEvent::Human(text) => {
+            RoomEvent::Human(text, extra) => {
                 let me = self.me.clone();
+                self.grant(extra);
                 self.publish_human(&me, &text);
             }
-            RoomEvent::Remote(p, Msg::Say { kind, text, .. }) if kind == "HUMAN" => {
+            RoomEvent::Remote(p, Msg::Say { kind, text, extra_turns, .. }) if kind == "HUMAN" => {
                 if let Some(j) = self.joiners.iter().find(|j| j.id == p).cloned() {
+                    self.grant(extra_turns);
                     self.publish_human(&j, &text);
                 }
             }
@@ -390,7 +476,8 @@ and where relevant information can be found. This one message needs no kind on t
         loop {
             let ev = tokio::time::timeout(TURN_TIMEOUT, self.rx.recv()).await.map_err(|_| anyhow!("a peer did not answer within {} minutes", TURN_TIMEOUT.as_secs() / 60))?;
             match ev {
-                Some(RoomEvent::Remote(p, Msg::Say { kind, text, .. })) if p == speaker && kind != "HUMAN" => {
+                Some(RoomEvent::Remote(p, Msg::Say { kind, text, tokens, .. })) if p == speaker && kind != "HUMAN" => {
+                    self.joiner_tokens.insert(p, tokens);
                     return Ok((kind, text));
                 }
                 Some(ev) => self.side_event(ev)?,
@@ -450,14 +537,14 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
                     }
                 };
                 let (kind, text) = if briefing { proto::parse_kind(&reply, "KNOWN_MISSING", &["KNOWN_MISSING"]) } else { proto::parse_kind(&reply, "PROPOSAL", &KINDS) };
-                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind, text });
+                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind, text, tokens: session.tokens(), extra_turns: 0 });
             }
             Some(RoomEvent::Remote(p, Msg::RoomClose { reason, result, .. })) if p == invite.from => {
                 std::fs::write(dir.join("result.md"), &result)?;
                 break Ok(reason);
             }
-            Some(RoomEvent::Human(text)) => {
-                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind: "HUMAN".into(), text });
+            Some(RoomEvent::Human(text, extra_turns)) => {
+                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind: "HUMAN".into(), text, tokens: session.tokens(), extra_turns });
             }
             Some(RoomEvent::Panic) | None => {
                 shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: "stopped on the peer's machine".into() });
