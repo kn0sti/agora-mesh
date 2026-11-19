@@ -1,6 +1,6 @@
 # agora-mesh
 
-> **Status: planning. Nothing here runs yet.** This repository currently holds the design. See [ARCHITECTURE.md](ARCHITECTURE.md) for the specification and the [roadmap](#roadmap) for what gets built in which order.
+> **Status: early development.** Stage 1 of the [roadmap](#roadmap) works: machines can form a network, with human approval, and stay connected. Agents cannot talk to each other yet; rooms come with stage 2. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
 
 A symmetric peer-to-peer mesh for Claude Code. It connects the Claude Code CLI on two or more machines so that the agents on them can talk as equals: plan together, criticise each other's ideas, split large tasks, review each other's code and keep a shared memory.
 
@@ -79,18 +79,25 @@ These numbers apply to headless sessions. Interactive sessions load connector to
 
 ## Quickstart
 
-Not available yet. The intended flow: tell your Claude Code
+The one-sentence installation through Claude Code ([INSTALL.md](INSTALL.md)) comes with stage 5. Until then, build from source with a stable Rust toolchain:
 
-> Install https://github.com/kn0sti/agora-mesh and help me set it up.
+```
+cargo build --release          # binary: target/release/agora
+agora setup --name MacBook     # once per machine
+agora open                     # machine A: prints a network ID
+agora join <network-id>        # machine B
+agora status                   # both: compare the four words
+agora approve <name>           # machine A
+```
 
-and it follows [INSTALL.md](INSTALL.md).
+`agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` runs the whole flow with three daemons on one machine.
 
 ## Roadmap
 
 | Stage | Content | Done when |
 |---|---|---|
-| 0 | This repository and the design documents | all decisions are written down |
-| 1 | Network: daemon, keys, join with approval, permanent connection | two machines reconnect on their own after a restart |
+| 0 ✓ | This repository and the design documents | all decisions are written down |
+| 1 ✓ | Network: daemon, keys, join with approval, permanent connection | two machines reconnect on their own after a restart |
 | 2 | Rooms: sessions without connectors, briefing, turn rules, watching and joining in | two agents present a plan they discussed |
 | 3 | Capacity: status, work splitting, takeover on a full limit, one git branch per peer, token display | a work package moves to the other peer on a full limit |
 | 4 | Shared memory: live sync, importance levels, closing notes, Obsidian, block list | an entry from A is visible on B seconds later |
