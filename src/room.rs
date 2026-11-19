@@ -400,6 +400,7 @@ struct Opener {
     others: String,
     /// Text of the agreed SPLIT_WORK message.
     plan: String,
+    started: std::time::Instant,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -487,6 +488,7 @@ pub async fn run_opener(
         work_dir,
         others,
         plan: String::new(),
+        started,
     };
 
     let brief_topic = match &project {
@@ -972,6 +974,8 @@ and where relevant information can be found. This one message needs no kind on t
             next: next.clone(),
         };
         append(&self.dir, "log.md", &render(&e));
+        // When each message was published, in seconds since the room opened.
+        append(&self.dir, "timeline.tsv", &format!("{}\t{}\t{}\t{}", e.seq, self.started.elapsed().as_secs(), e.from_name, e.kind));
         for j in &self.joiners {
             // A peer that is offline right now asks for what it missed when it is back.
             self.shared.send_to(&j.id, discuss_msg(&self.room_id, &e));
