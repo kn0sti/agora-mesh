@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
 
+use crate::memory::{self, MemEntry};
 use crate::project;
 use crate::proto::{self, ALPN, Capacity, Member, Msg, Ticket};
 use crate::room::{self, Invite, RoomEvent, RoomHandle, RoomState};
@@ -66,6 +67,10 @@ pub struct Shared {
     rooms: Mutex<HashMap<String, RoomHandle>>,
     /// Last known capacity per peer id, our own included.
     capacity: Mutex<HashMap<String, Capacity>>,
+    /// Signs this machine's shared-memory entries.
+    secret: SecretKey,
+    /// High-importance memory entries, for sessions that are running.
+    notices: Mutex<Vec<String>>,
     /// Invitations waiting for `agora accept`.
     invites: Mutex<HashMap<String, Invite>>,
     /// Join requests waiting for a human, by nickname.
@@ -85,6 +90,18 @@ impl Shared {
         }
     }
 
+    pub fn notices_len(&self) -> usize {
+        self.notices.lock().unwrap().len()
+    }
+
+    /// Notices a session has not seen yet; moves its marker forward.
+    pub fn notices_since(&self, seen: &mut usize) -> Vec<String> {
+        let all = self.notices.lock().unwrap();
+        let new = all.get(*seen..).map(<[String]>::to_vec).unwrap_or_default();
+        *seen = all.len();
+        new
+    }
+
     pub fn capacity_of(&self, peer: &str) -> Option<Capacity> {
         self.capacity.lock().unwrap().get(peer).copied()
     }
@@ -98,6 +115,111 @@ impl Shared {
     }
 }
 
+/// Appends a line to events.log. `agora events` prints it; the plugin's monitor
+/// passes it to the session a human is working in.
+pub fn event(kind: &str, text: &str) {
+    use std::io::Write;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(home().join("events.log")) {
+        let _ = writeln!(f, "{now}\t{kind}\t{}", text.replace('\n', " "));
+    }
+}
+
+/// Removes rooms whose log has not changed for 30 days.
+fn prune_rooms() {
+    let Ok(dirs) = std::fs::read_dir(home().join("rooms")) else { return };
+    for d in dirs.flatten() {
+        let old = std::fs::metadata(d.path().join("log.md")).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        if old.is_some_and(|age| age > Duration::from_secs(30 * 24 * 3600)) {
+            let _ = std::fs::remove_dir_all(d.path());
+        }
+    }
+}
+
+/// Stores a memory entry if it is new, announces high importance, and passes it on.
+fn accept_entry(shared: &Shared, entry: &MemEntry, from: Option<&str>) -> Result<bool> {
+    let (mirror, peers) = {
+        let state = shared.state.lock().unwrap();
+        let peers: Vec<String> = state.network(&entry.network).map(|n| n.peers.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
+        (state.obsidian.clone(), peers)
+    };
+    if !memory::apply(entry, mirror.as_deref())? {
+        return Ok(false);
+    }
+    if entry.importance == "high" && !entry.deleted {
+        let line = format!("{} (by {}; read it with `agora memory show {}`)", entry.title, entry.author_name, entry.id);
+        shared.notices.lock().unwrap().push(line.clone());
+        event("memory", &line);
+    }
+    for p in peers {
+        if Some(p.as_str()) != from {
+            shared.send_to(&p, Msg::MemPut { entry: entry.clone() });
+        }
+    }
+    Ok(true)
+}
+
+/// Checks an entry a peer sent before storing it.
+fn receive_entry(shared: &Shared, peer: &str, entry: &MemEntry) -> Result<()> {
+    {
+        let state = shared.state.lock().unwrap();
+        let net = state.network(&entry.network).filter(|n| n.status == NetStatus::Active).ok_or_else(|| anyhow!("unknown network"))?;
+        if !net.peers.iter().any(|m| m.id == peer) {
+            bail!("the sender is not a member of that network");
+        }
+        if entry.author != shared.me && !net.peers.iter().any(|m| m.id == entry.author) {
+            bail!("the author is not a member of that network");
+        }
+    }
+    entry.verify()?;
+    accept_entry(shared, entry, Some(peer))?;
+    Ok(())
+}
+
+/// Sends a peer every entry of the networks we share, when a link comes up.
+fn sync_memory(shared: &Arc<Shared>, peer: &str) {
+    let Some(tx) = shared.conns.lock().unwrap().get(peer).cloned() else { return };
+    let networks: Vec<String> =
+        shared.state.lock().unwrap().networks.iter().filter(|n| n.peers.iter().any(|m| m.id == peer)).map(|n| n.id.clone()).collect();
+    tokio::spawn(async move {
+        for n in networks {
+            for entry in memory::load(&n).into_values() {
+                if tx.send(Msg::MemPut { entry }).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// The network a command means: the named one, or the only one this machine is in.
+fn pick_network(shared: &Shared, wanted: Option<&String>) -> Result<String> {
+    let state = shared.state.lock().unwrap();
+    let active: Vec<&Network> = state.networks.iter().filter(|n| n.status == NetStatus::Active).collect();
+    match wanted.filter(|w| !w.is_empty()) {
+        Some(w) => active.iter().find(|n| n.id == *w).map(|n| n.id.clone()).ok_or_else(|| anyhow!("no network {w}")),
+        None => match active.as_slice() {
+            [] => bail!("this machine is in no network yet"),
+            [one] => Ok(one.id.clone()),
+            _ => bail!("this machine is in several networks; name one with --network"),
+        },
+    }
+}
+
+/// Writes an entry from this machine: block list, signature, storage, replication.
+fn remember(shared: &Shared, network: &str, title: &str, body: &str, importance: &str, deleted: bool) -> Result<MemEntry> {
+    let (name, blocked) = {
+        let state = shared.state.lock().unwrap();
+        (state.name.clone(), memory::blocked(&state.blocklist, &format!("{title}\n{body}")).map(str::to_string))
+    };
+    if let Some(term) = blocked {
+        bail!("not saved: the text contains \"{term}\", which is on this machine's block list");
+    }
+    let entry = memory::compose(network, &shared.secret, &name, title, body, importance, deleted)?;
+    accept_entry(shared, &entry, None)?;
+    Ok(entry)
+}
+
 pub fn secret_key_from_hex(hex: &str) -> Result<SecretKey> {
     let bytes = data_encoding::HEXLOWER.decode(hex.as_bytes()).map_err(|_| anyhow!("secret key in state.json is damaged"))?;
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("secret key has the wrong length"))?;
@@ -108,7 +230,7 @@ pub async fn run() -> Result<()> {
     let state = State::load()?.ok_or_else(|| anyhow!("not set up yet: run `agora setup --name <peer-name>` first"))?;
     let secret = secret_key_from_hex(&state.secret_key)?;
     let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(secret)
+        .secret_key(secret.clone())
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await
@@ -126,12 +248,15 @@ pub async fn run() -> Result<()> {
         conns: Mutex::new(HashMap::new()),
         rooms: Mutex::new(HashMap::new()),
         capacity: Mutex::new(HashMap::new()),
+        secret,
+        notices: Mutex::new(Vec::new()),
         invites: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
         redial: Notify::new(),
     });
     eprintln!("agora daemon running, peer id {}", shared.me);
+    prune_rooms();
 
     tokio::spawn(accept_loop(shared.clone()));
     tokio::spawn(dial_loop(shared.clone()));
@@ -219,6 +344,7 @@ async fn handle_incoming(shared: Arc<Shared>, incoming: iroh::endpoint::Incoming
             let my_name = shared.state.lock().unwrap().name.clone();
             proto::write_msg(&mut send, &Msg::Approve { peer_name: my_name, members }).await?;
             shared.conns.lock().unwrap().insert(peer.clone(), tx.clone());
+            sync_memory(&shared, &peer);
         }
         Decision::Pending => {
             let mut nick = peer_name.clone();
@@ -233,6 +359,7 @@ async fn handle_incoming(shared: Arc<Shared>, incoming: iroh::endpoint::Incoming
                 pending.insert(nick.clone(), PendingJoin { id: peer.clone(), network: network.clone(), tx: tx.clone() });
             }
             eprintln!("join request from \"{nick}\" ({}), words: {}", short(&peer), proto::words(&shared.me, &peer));
+            event("join-request", &format!("\"{nick}\" wants to join; words: {} (agora approve {nick})", proto::words(&shared.me, &peer)));
             proto::write_msg(&mut send, &Msg::Pending).await?;
         }
     }
@@ -356,6 +483,7 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             set_members(shared, peer, network, members, true)?;
             shared.conns.lock().unwrap().insert(peer.to_string(), tx.clone());
             shared.redial.notify_one();
+            sync_memory(shared, peer);
             Ok(true)
         }
         Msg::Members { network: n, members } => {
@@ -373,6 +501,14 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
                 eprintln!("removed from network {network} by {}", short(peer));
             }
             Ok(still_member)
+        }
+        Msg::MemPut { entry } => {
+            if is_live_member(shared, peer, tx) {
+                if let Err(e) = receive_entry(shared, peer, &entry) {
+                    eprintln!("memory entry from {} ignored: {e}", short(peer));
+                }
+            }
+            Ok(true)
         }
         Msg::Status { capacity } => {
             if is_live_member(shared, peer, tx) {
@@ -446,6 +582,7 @@ fn on_invite(
         start_joiner(shared, invite);
     } else {
         eprintln!("room invitation {room_id} from \"{}\": {}", m.name, invite.topic);
+        event("invitation", &format!("\"{}\" invites to room {room_id}: {} (agora accept {room_id})", m.name, invite.topic));
         shared.invites.lock().unwrap().insert(room_id, invite);
     }
 }
@@ -598,6 +735,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             let my_name = shared.state.lock().unwrap().name.clone();
             p.tx.try_send(Msg::Approve { peer_name: my_name, members }).map_err(|_| anyhow!("the peer disconnected; it will ask again"))?;
             broadcast_members(shared, &p.network);
+            sync_memory(shared, &p.id);
             Ok(format!("Approved \"{name}\" (level {level}, rights {rights}). Words were: {}", proto::words(&shared.me, &p.id)))
         }
         "reject" => {
@@ -640,6 +778,81 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             m.rights = rights.clone();
             state.save()?;
             Ok(format!("\"{name}\" now has level {level} and rights {rights} on this machine."))
+        }
+        "remember" => {
+            let text = arg("text")?;
+            let network = pick_network(shared, req.args.get("network"))?;
+            let title = match req.args.get("title").filter(|t| !t.trim().is_empty()) {
+                Some(t) => t.clone(),
+                None => text.lines().next().unwrap_or("").chars().take(60).collect(),
+            };
+            let importance = req.args.get("importance").cloned().unwrap_or_else(|| "normal".into());
+            let e = remember(shared, &network, &title, &text, &importance, false)?;
+            Ok(format!("Saved \"{}\" as {} ({}) in network {network}.", e.title, e.id, e.importance))
+        }
+        "memory" => {
+            let action = arg("action")?;
+            let networks: Vec<String> = {
+                let state = shared.state.lock().unwrap();
+                state.networks.iter().filter(|n| n.status == NetStatus::Active).map(|n| n.id.clone()).collect()
+            };
+            if action == "list" {
+                if networks.is_empty() {
+                    bail!("this machine is in no network yet");
+                }
+                return Ok(networks.iter().map(|n| format!("network {n}  ({})\n{}", memory::dir(n).display(), memory::list(n))).collect::<Vec<_>>().join("\n"));
+            }
+            let id = arg("id")?;
+            let found = networks.iter().find_map(|n| memory::load(n).remove(&id).filter(|e| !e.deleted));
+            let e = found.ok_or_else(|| anyhow!("no entry {id} (see `agora memory`)"))?;
+            match action.as_str() {
+                "show" => Ok(format!("{} ({}, by {})\n\n{}", e.title, e.importance, e.author_name, e.body)),
+                "forget" => {
+                    remember(shared, &e.network, &e.title, "", &e.importance, true)?;
+                    Ok(format!("Forgot {id} on all peers."))
+                }
+                other => bail!("unknown memory action: {other}"),
+            }
+        }
+        "block" => {
+            let action = arg("action")?;
+            let mut state = shared.state.lock().unwrap();
+            match action.as_str() {
+                "list" => Ok(if state.blocklist.is_empty() { "the block list is empty".into() } else { state.blocklist.join("\n") }),
+                "add" => {
+                    let term = arg("term")?;
+                    if term.trim().is_empty() {
+                        bail!("the term is empty");
+                    }
+                    if !state.blocklist.contains(&term) {
+                        state.blocklist.push(term.clone());
+                        state.save()?;
+                    }
+                    Ok(format!("\"{term}\" will never be written to the shared memory from this machine."))
+                }
+                "remove" => {
+                    let term = arg("term")?;
+                    state.blocklist.retain(|t| *t != term);
+                    state.save()?;
+                    Ok(format!("Removed \"{term}\" from the block list."))
+                }
+                other => bail!("unknown block action: {other}"),
+            }
+        }
+        "obsidian" => {
+            let path = arg("path")?;
+            let mut state = shared.state.lock().unwrap();
+            if path == "off" {
+                state.obsidian = None;
+                state.save()?;
+                return Ok("The shared memory is no longer mirrored.".into());
+            }
+            if !std::path::Path::new(&path).is_dir() {
+                bail!("{path} is not a folder");
+            }
+            state.obsidian = Some(path.clone());
+            state.save()?;
+            Ok(format!("New and changed entries are mirrored to {path}/agora/<network>/."))
         }
         "project" => {
             let action = arg("action")?;
@@ -787,6 +1000,14 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     if joiners.is_empty() {
         bail!("no peer is online to discuss with");
     }
+    let remember_as = req.args.get("remember").cloned().unwrap_or_else(|| "normal".into());
+    if remember_as != "none" && !memory::IMPORTANCE.contains(&remember_as.as_str()) {
+        bail!("--remember must be one of high, normal, low, none");
+    }
+    let network = {
+        let state = shared.state.lock().unwrap();
+        state.networks.iter().find(|n| n.peers.iter().any(|m| m.id == joiners[0].id)).map(|n| n.id.clone()).unwrap_or_default()
+    };
     if shared.rooms.lock().unwrap().len() >= MAX_ROOMS {
         bail!("already in {MAX_ROOMS} rooms");
     }
@@ -812,8 +1033,19 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     eprintln!("room {id} opened: {topic}");
     // The room outlives this request: it may pause for a human and go on later.
     let (sh, rid) = (shared.clone(), id.clone());
+    let note_topic = topic.clone();
     tokio::spawn(async move {
         let result = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, project, rx, state_tx.clone()).await;
+        if let Ok(text) = &result {
+            event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
+            // The result goes into the shared memory so every peer keeps it.
+            if remember_as != "none" {
+                let title = format!("Room {rid}: {}", note_topic.chars().take(60).collect::<String>());
+                if let Err(e) = remember(&sh, &network, &title, text, &remember_as, false) {
+                    eprintln!("room {rid}: result not saved to the shared memory: {e}");
+                }
+            }
+        }
         let _ = state_tx.send(RoomState::Closed(result.map_err(|e| e.to_string())));
         sh.rooms.lock().unwrap().remove(&rid);
     });

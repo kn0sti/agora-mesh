@@ -1,6 +1,7 @@
 //! `agora` — command and daemon of agora-mesh. See ARCHITECTURE.md.
 
 mod daemon;
+mod memory;
 mod project;
 mod proto;
 mod room;
@@ -86,6 +87,41 @@ enum Cmd {
         /// Git repository the room is about; default: the one you are in. "none" for no project
         #[arg(long, default_value = "")]
         project: String,
+        /// Importance of the result in the shared memory: high, normal, low or none
+        #[arg(long, default_value = "normal")]
+        remember: String,
+    },
+    /// Save a fact in the shared memory of all peers
+    Remember {
+        text: String,
+        /// Short title; an entry with the same title is replaced
+        #[arg(long, default_value = "")]
+        title: String,
+        /// high: running sessions are told at once; normal: in the index; low: archive only
+        #[arg(long, default_value = "normal")]
+        importance: String,
+        #[arg(long, default_value = "")]
+        network: String,
+    },
+    /// List the shared memory, or show or forget one entry
+    Memory {
+        #[command(subcommand)]
+        action: Option<MemoryCmd>,
+    },
+    /// Remove an entry from the shared memory on all peers
+    Forget { id: String },
+    /// Terms that must never go into the shared memory from this machine
+    Block {
+        #[command(subcommand)]
+        action: BlockCmd,
+    },
+    /// Mirror the shared memory into an Obsidian vault folder, or "off"
+    Obsidian { path: String },
+    /// Print what happened: join requests, invitations, paused and closed rooms, important memory entries
+    Events {
+        /// Keep running and print new events as they happen
+        #[arg(long)]
+        follow: bool,
     },
     /// Local clones a room session may work in
     Project {
@@ -121,6 +157,23 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum MemoryCmd {
+    /// List all entries
+    List,
+    /// Print one entry
+    Show { id: String },
+    /// Remove an entry on all peers
+    Forget { id: String },
+}
+
+#[derive(Subcommand)]
+enum BlockCmd {
+    Add { term: String },
+    List,
+    Remove { term: String },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     /// Register a clone; default: the repository you are in
     Add { path: Option<String> },
@@ -146,9 +199,26 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens, project } => {
-            call("discuss", &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens), ("project", project), ("cwd", cwd())])
+        Cmd::Discuss { topic, with, turns, tokens, project, remember } => call(
+            "discuss",
+            &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens), ("project", project), ("remember", remember), ("cwd", cwd())],
+        ),
+        Cmd::Remember { text, title, importance, network } => {
+            call("remember", &[("text", text), ("title", title), ("importance", importance), ("network", network)])
         }
+        Cmd::Memory { action } => match action.unwrap_or(MemoryCmd::List) {
+            MemoryCmd::List => call("memory", &[("action", "list".into())]),
+            MemoryCmd::Show { id } => call("memory", &[("action", "show".into()), ("id", id)]),
+            MemoryCmd::Forget { id } => call("memory", &[("action", "forget".into()), ("id", id)]),
+        },
+        Cmd::Forget { id } => call("memory", &[("action", "forget".into()), ("id", id)]),
+        Cmd::Block { action } => match action {
+            BlockCmd::Add { term } => call("block", &[("action", "add".into()), ("term", term)]),
+            BlockCmd::List => call("block", &[("action", "list".into())]),
+            BlockCmd::Remove { term } => call("block", &[("action", "remove".into()), ("term", term)]),
+        },
+        Cmd::Obsidian { path } => call("obsidian", &[("path", path)]),
+        Cmd::Events { follow } => events(follow),
         Cmd::Project { action } => match action {
             ProjectCmd::Add { path } => call("project", &[("action", "add".into()), ("path", path.unwrap_or_else(cwd))]),
             ProjectCmd::List => call("project", &[("action", "list".into())]),
@@ -180,7 +250,7 @@ fn setup(name: &str) -> Result<()> {
     }
     let key: [u8; 32] = rand::random();
     let public = iroh::SecretKey::from_bytes(&key).public();
-    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![] }.save()?;
+    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![], blocklist: vec![], obsidian: None }.save()?;
     say!("Set up peer \"{name}\" with id {public}");
     say!("Data directory: {}", state::home().display());
     Ok(())
@@ -235,6 +305,36 @@ fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
         Ok(())
     } else {
         bail!("{}", resp.text)
+    }
+}
+
+/// Prints events.log: the last 20 lines, or with `follow` every new line as it
+/// is written. The plugin's monitor runs this to tell a session what happened.
+fn events(follow: bool) -> Result<()> {
+    let path = state::home().join("events.log");
+    let show = |line: &str| {
+        let mut parts = line.splitn(3, '\t');
+        if let (Some(_), Some(kind), Some(text)) = (parts.next(), parts.next(), parts.next()) {
+            say!("[agora] {kind}: {text}");
+        }
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !follow {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            say!("no events yet");
+        }
+        lines[lines.len().saturating_sub(20)..].iter().for_each(|l| show(l));
+        return Ok(());
+    }
+    let mut shown = text.len();
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if text.len() > shown {
+            text[shown..].lines().for_each(show);
+            shown = text.len();
+        }
     }
 }
 
