@@ -64,6 +64,8 @@ Room sessions run with **full rights by default**. The warning is shown when a n
 
 A block list (paths and tags) names content that never leaves the machine at any level.
 
+Level and rights are local policy. Each machine decides them for every peer with `agora approve --level --rights` or later with `agora trust <peer> --level --rights`; a member list received from another peer never changes them. A peer learned from a member list starts at level 1 with full rights.
+
 ## 5. Rooms
 
 A room belongs to one topic or task and has three parts:
@@ -134,7 +136,13 @@ Tested on Claude Code 2.1.328: two messages sent 12 seconds apart to one process
 
 `--strict-mcp-config` is mandatory. A default headless session loads every connected connector; measured cost is about 191,000 input tokens per turn against about 3,700 without.
 
-**Unverified (stage 2):** the fixed context added by the built-in tools a full-rights session needs.
+Measured in stage 2 with the built-in tools enabled (smallest model): about 25,500 input tokens per turn in an empty room directory, and 42,000 to 53,000 per turn on machines whose session loads a large `CLAUDE.md` and memory and uses tools during the turn. That context is the peer's own knowledge, which is the point of asking it, but it is the main cost of a room.
+
+Rights map to the session as follows: `full` starts it with `--permission-mode auto` (Claude Code's own safety classifier stays active; `AGORA_PERMISSION_MODE` overrides the mode), `read` with `--tools Read,Grep,Glob`, `talk` with no tools. `AGORA_CLAUDE_ARGS` appends further arguments, for example a model.
+
+The session runs in a neutral directory per room. Resolving the room's project to a local clone comes with stage 3.
+
+In the current implementation room messages travel on the peer link instead of a stream per room, and a room has one message more than section 6 lists: `SAY`, a joiner's contribution before the opener has numbered it.
 
 ### Interactive sessions
 
@@ -178,7 +186,8 @@ Usage instructions ship as a skill, which costs one line of context until it is 
 | Point | Stage |
 |---|---|
 | NAT traversal between two real home networks | 1 |
-| Fixed context of built-in tools in a full-rights session | 2 |
+| Token budget per room (turn budget is enforced, tokens are only counted so far) | 3 |
+| Pausing a room on `NEED_HUMAN` and resuming it (it closes with an overview so far) | 3 |
 | Detecting a usage limit and its reset time | 3 |
 | Replication of the shared memory | 4 |
 | Plugin monitor and Windows behaviour in practice | 5 |

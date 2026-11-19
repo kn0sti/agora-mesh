@@ -2,6 +2,7 @@
 
 mod daemon;
 mod proto;
+mod room;
 mod state;
 
 use std::collections::HashMap;
@@ -52,6 +53,38 @@ enum Cmd {
     Reject { name: String },
     /// Remove a peer from its network
     Revoke { name: String },
+    /// Set what a peer may do on this machine
+    Trust {
+        name: String,
+        /// Knowledge level 1, 2 or 3; from 2 on, room invitations are accepted automatically
+        #[arg(long, default_value = "1")]
+        level: String,
+        /// full, read or talk
+        #[arg(long, default_value = "full")]
+        rights: String,
+    },
+    /// Open a room, let the agents discuss, and print their result
+    Discuss {
+        topic: String,
+        /// Peer names, comma-separated; default: every peer that is online
+        #[arg(long, default_value = "")]
+        with: String,
+        /// Turns per peer after the briefing
+        #[arg(long, default_value = "6")]
+        turns: String,
+    },
+    /// List running rooms and open invitations
+    Rooms,
+    /// Accept a room invitation
+    Accept { room: String },
+    /// Decline a room invitation
+    Decline { room: String },
+    /// Say something in a running room as a human
+    Say { room: String, text: String },
+    /// Follow a room's log
+    Watch { room: String },
+    /// Stop all rooms and their sessions on this machine
+    Panic,
     /// Stop the daemon
     Stop,
 }
@@ -68,6 +101,14 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
+        Cmd::Discuss { topic, with, turns } => call("discuss", &[("topic", topic), ("with", with), ("turns", turns)]),
+        Cmd::Trust { name, level, rights } => call("trust", &[("name", name), ("level", level), ("rights", rights)]),
+        Cmd::Rooms => call("rooms", &[]),
+        Cmd::Accept { room } => call("accept", &[("room", room)]),
+        Cmd::Decline { room } => call("decline", &[("room", room)]),
+        Cmd::Say { room, text } => call("say", &[("room", room), ("text", text)]),
+        Cmd::Panic => call("panic", &[]),
+        Cmd::Watch { room } => watch(&room),
     }
 }
 
@@ -135,6 +176,29 @@ fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
         Ok(())
     } else {
         bail!("{}", resp.text)
+    }
+}
+
+/// Prints a room's log as it grows, until the room has a result.
+fn watch(room: &str) -> Result<()> {
+    let dir = room::room_dir(room);
+    let log = dir.join("log.md");
+    if !log.exists() {
+        bail!("no room {room} on this machine");
+    }
+    let mut shown = 0;
+    loop {
+        let done = dir.join("result.md").exists();
+        let text = std::fs::read_to_string(&log)?;
+        if text.len() > shown {
+            print!("{}", &text[shown..]);
+            std::io::stdout().flush()?;
+            shown = text.len();
+        }
+        if done {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 

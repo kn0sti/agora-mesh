@@ -1,6 +1,6 @@
 # agora-mesh
 
-> **Status: early development.** Stage 1 of the [roadmap](#roadmap) works: machines can form a network, with human approval, and stay connected. Agents cannot talk to each other yet; rooms come with stage 2. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
+> **Status: early development.** Stages 1 and 2 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room and hand back a result. Work splitting, shared memory and the plugin are not built yet. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
 
 A symmetric peer-to-peer mesh for Claude Code. It connects the Claude Code CLI on two or more machines so that the agents on them can talk as equals: plan together, criticise each other's ideas, split large tasks, review each other's code and keep a shared memory.
 
@@ -75,7 +75,7 @@ Measured on one machine, headless `claude -p`, two turns, built-in tools off, sm
 | without connectors (`--strict-mcp-config`) | about 3,700 |
 | plus a short custom system prompt | about 650 |
 
-These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. The cost of the built-in tools a full-rights room session needs is not measured yet. `agora bench` will measure the baseline on your own machine instead of quoting ours.
+These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` will measure the baseline on your own machine instead of quoting ours.
 
 ## Quickstart
 
@@ -90,7 +90,19 @@ agora status                   # both: compare the four words
 agora approve <name>           # machine A
 ```
 
-`agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` runs the whole flow with three daemons on one machine.
+Then let the agents talk:
+
+```
+agora discuss "How should we structure the database migration?"   # prints the result
+agora rooms                    # running rooms and open invitations
+agora accept <room>            # other machine, unless it trusts the inviter
+agora trust <name> --level 2   # accept this peer's invitations automatically
+agora watch <room>             # follow a room live
+agora say <room> "text"        # join in as a human
+agora panic                    # stop all rooms and their sessions here
+```
+
+`agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` and `tests/e2e-rooms.sh` run the whole flow with local daemons; the second uses a scripted stand-in for Claude and costs no tokens.
 
 ## Roadmap
 
@@ -98,7 +110,7 @@ agora approve <name>           # machine A
 |---|---|---|
 | 0 ✓ | This repository and the design documents | all decisions are written down |
 | 1 ✓ | Network: daemon, keys, join with approval, permanent connection | two machines reconnect on their own after a restart |
-| 2 | Rooms: sessions without connectors, briefing, turn rules, watching and joining in | two agents present a plan they discussed |
+| 2 ✓ | Rooms: sessions without connectors, briefing, turn rules, watching and joining in | two agents present a plan they discussed |
 | 3 | Capacity: status, work splitting, takeover on a full limit, one git branch per peer, token display | a work package moves to the other peer on a full limit |
 | 4 | Shared memory: live sync, importance levels, closing notes, Obsidian, block list | an entry from A is visible on B seconds later |
 | 5 | Plugin wrapper and prebuilt binaries for every platform | installation works with one sentence to Claude |

@@ -32,6 +32,45 @@ pub enum Msg {
     Members { network: String, members: Vec<Member> },
     #[serde(rename = "HEARTBEAT")]
     Heartbeat,
+    /// Opener to joiner: start a fresh session for this topic.
+    #[serde(rename = "ROOM_INVITE")]
+    RoomInvite { room_id: String, topic: String, turn_budget: u32, participants: Vec<Participant> },
+    #[serde(rename = "ROOM_JOIN")]
+    RoomJoin { room_id: String },
+    #[serde(rename = "ROOM_DECLINE")]
+    RoomDecline { room_id: String, reason: String },
+    /// Joiner to opener: a contribution that has no number yet.
+    #[serde(rename = "SAY")]
+    Say { room_id: String, kind: String, text: String },
+    /// Opener to joiners: a numbered contribution. `next` names who speaks now.
+    #[serde(rename = "DISCUSS_MSG")]
+    Discuss { room_id: String, seq: u32, from: String, from_name: String, kind: String, text: String, turns_left: u32, next: Option<String> },
+    #[serde(rename = "ROOM_CLOSE")]
+    RoomClose { room_id: String, reason: String, result: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Participant {
+    pub id: String,
+    pub name: String,
+}
+
+/// Kinds an agent may put on the first line of a contribution.
+pub const KINDS: [&str; 8] = ["PROPOSAL", "CRITIQUE", "QUESTION", "ANSWER", "SPLIT_WORK", "PASS", "CONSENSUS", "NEED_HUMAN"];
+
+/// Splits a session's answer into kind and text. Falls back to `default`
+/// when the first line is not one of the allowed kinds.
+pub fn parse_kind(reply: &str, default: &str, allowed: &[&str]) -> (String, String) {
+    let reply = reply.trim();
+    let (first, rest) = reply.split_once('\n').unwrap_or((reply, ""));
+    let (head, tail) = first.split_once(':').unwrap_or((first, ""));
+    let head = head.trim().trim_matches(|c| c == '*' || c == '#' || c == '`').trim().to_uppercase().replace(' ', "_");
+    if allowed.contains(&head.as_str()) {
+        let text = format!("{}\n{}", tail.trim(), rest).trim().to_string();
+        (head, text)
+    } else {
+        (default.to_string(), reply.to_string())
+    }
 }
 
 pub async fn write_msg(send: &mut SendStream, msg: &Msg) -> Result<()> {
@@ -114,6 +153,14 @@ mod tests {
         assert_eq!(words("a", "b"), words("b", "a"));
         assert_ne!(words("a", "b"), words("a", "c"));
         assert_eq!(words("a", "b").split(' ').count(), 4);
+    }
+
+    #[test]
+    fn kind_is_read_from_the_first_line() {
+        assert_eq!(parse_kind("CRITIQUE\nno", "PROPOSAL", &KINDS), ("CRITIQUE".into(), "no".into()));
+        assert_eq!(parse_kind("**need human**: decide\nplease", "PROPOSAL", &KINDS), ("NEED_HUMAN".into(), "decide\nplease".into()));
+        assert_eq!(parse_kind("I think so", "PROPOSAL", &KINDS), ("PROPOSAL".into(), "I think so".into()));
+        assert_eq!(parse_kind("CONSENSUS", "PROPOSAL", &["KNOWN_MISSING"]), ("PROPOSAL".into(), "CONSENSUS".into()));
     }
 
     #[test]

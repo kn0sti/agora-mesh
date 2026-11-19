@@ -13,11 +13,13 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc};
 
 use crate::proto::{self, ALPN, Member, Msg, Ticket};
+use crate::room::{self, Invite, RoomEvent, RoomHandle};
 use crate::state::{NetStatus, Network, State, home};
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const DEAD_AFTER: Duration = Duration::from_secs(45);
 const REDIAL: Duration = Duration::from_secs(10);
+const MAX_ROOMS: usize = 2;
 
 /// What the `agora` command reads to find the running daemon.
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,16 +55,30 @@ struct PendingJoin {
     tx: mpsc::Sender<Msg>,
 }
 
-struct Shared {
-    me: String,
+pub struct Shared {
+    pub me: String,
     endpoint: Endpoint,
-    state: Mutex<State>,
+    pub state: Mutex<State>,
     /// Approved peers we currently hold a live link to.
     conns: Mutex<HashMap<String, mpsc::Sender<Msg>>>,
+    /// Rooms running on this machine.
+    rooms: Mutex<HashMap<String, RoomHandle>>,
+    /// Invitations waiting for `agora accept`.
+    invites: Mutex<HashMap<String, Invite>>,
     /// Join requests waiting for a human, by nickname.
     pending: Mutex<HashMap<String, PendingJoin>>,
     dialing: Mutex<HashSet<String>>,
     redial: Notify,
+}
+
+impl Shared {
+    /// Queues a message for an approved, connected peer. False if it is offline.
+    pub fn send_to(&self, peer: &str, msg: Msg) -> bool {
+        match self.conns.lock().unwrap().get(peer) {
+            Some(tx) => tx.try_send(msg).is_ok(),
+            None => false,
+        }
+    }
 }
 
 pub fn secret_key_from_hex(hex: &str) -> Result<SecretKey> {
@@ -91,6 +107,8 @@ pub async fn run() -> Result<()> {
         endpoint: endpoint.clone(),
         state: Mutex::new(state),
         conns: Mutex::new(HashMap::new()),
+        rooms: Mutex::new(HashMap::new()),
+        invites: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
         redial: Notify::new(),
@@ -313,7 +331,7 @@ async fn run_link(
 
 /// Applies one message from a peer. Returns false when the link should end.
 fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>, msg: Msg) -> Result<bool> {
-    match msg {
+    match msg.clone() {
         Msg::Heartbeat | Msg::Pending | Msg::Hello { .. } => Ok(true),
         Msg::Approve { members, .. } => {
             // Only the peer we asked may admit us, and only into the network we asked for.
@@ -338,6 +356,24 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             }
             Ok(still_member)
         }
+        Msg::RoomInvite { room_id, topic, turn_budget, participants } => {
+            if is_live_member(shared, peer, tx) {
+                on_invite(shared, peer, room_id, topic, turn_budget, participants);
+            }
+            Ok(true)
+        }
+        Msg::RoomJoin { ref room_id }
+        | Msg::RoomDecline { ref room_id, .. }
+        | Msg::Say { ref room_id, .. }
+        | Msg::Discuss { ref room_id, .. }
+        | Msg::RoomClose { ref room_id, .. } => {
+            if is_live_member(shared, peer, tx) {
+                if let Some(room) = shared.rooms.lock().unwrap().get(room_id) {
+                    let _ = room.tx.try_send(RoomEvent::Remote(peer.to_string(), msg.clone()));
+                }
+            }
+            Ok(true)
+        }
         Msg::Reject { reason } => {
             let mut state = shared.state.lock().unwrap();
             let joining = state.network(network).is_some_and(|n| n.status == NetStatus::Joining);
@@ -349,6 +385,49 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             Ok(false)
         }
     }
+}
+
+/// True if this link belongs to an approved peer. Room messages on a link that
+/// still waits for approval are ignored.
+fn is_live_member(shared: &Shared, peer: &str, tx: &mpsc::Sender<Msg>) -> bool {
+    shared.conns.lock().unwrap().get(peer).is_some_and(|t| t.same_channel(tx))
+}
+
+fn member(shared: &Shared, id: &str) -> Option<Member> {
+    let state = shared.state.lock().unwrap();
+    state.networks.iter().flat_map(|n| n.peers.iter()).find(|m| m.id == id).cloned()
+}
+
+/// A peer invites us into a room. Peers we gave level 2 or higher start a session
+/// at once; all others wait for `agora accept`.
+fn on_invite(shared: &Arc<Shared>, peer: &str, room_id: String, topic: String, turn_budget: u32, participants: Vec<proto::Participant>) {
+    let Some(m) = member(shared, peer) else { return };
+    if !room_id.chars().all(|c| c.is_ascii_alphanumeric()) || room_id.is_empty() || room_id.len() > 32 {
+        return;
+    }
+    let invite = Invite { room_id: room_id.clone(), topic, from: peer.to_string(), turn_budget, participants, rights: m.rights.clone() };
+    let busy = shared.rooms.lock().unwrap().len() >= MAX_ROOMS;
+    if busy {
+        shared.send_to(peer, Msg::RoomDecline { room_id, reason: format!("already in {MAX_ROOMS} rooms") });
+    } else if m.level >= 2 {
+        start_joiner(shared, invite);
+    } else {
+        eprintln!("room invitation {room_id} from \"{}\": {}", m.name, invite.topic);
+        shared.invites.lock().unwrap().insert(room_id, invite);
+    }
+}
+
+fn start_joiner(shared: &Arc<Shared>, invite: Invite) {
+    let (tx, rx) = mpsc::channel(64);
+    let id = invite.room_id.clone();
+    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: invite.topic.clone(), role: "joined", tx });
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        if let Err(e) = room::run_joiner(shared.clone(), invite, rx).await {
+            eprintln!("room {id} ended: {e}");
+        }
+        shared.rooms.lock().unwrap().remove(&id);
+    });
 }
 
 /// Replaces our member list for a network with the one a peer sent.
@@ -364,7 +443,19 @@ fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>,
     if !trusted || !members.iter().any(|m| m.id == from) {
         bail!("ignoring member list from {} (not entitled)", short(from));
     }
-    net.peers = members.into_iter().filter(|m| m.id != me).collect();
+    // Level and rights are local policy: keep what this machine decided for peers
+    // it already knows, and start new ones at the defaults.
+    let known: HashMap<String, (u8, String)> = net.peers.iter().map(|m| (m.id.clone(), (m.level, m.rights.clone()))).collect();
+    net.peers = members
+        .into_iter()
+        .filter(|m| m.id != me)
+        .map(|mut m| {
+            let (level, rights) = known.get(&m.id).cloned().unwrap_or((1, "full".into()));
+            m.level = level;
+            m.rights = rights;
+            m
+        })
+        .collect();
     net.status = NetStatus::Active;
     state.save()
 }
@@ -401,6 +492,11 @@ async fn serve_control(shared: Arc<Shared>, stream: tokio::net::TcpStream, token
     let req: Request = serde_json::from_str(&line).context("malformed control request")?;
     let resp = if req.token != token {
         Response { ok: false, text: "wrong control token".into() }
+    } else if req.cmd == "discuss" {
+        match discuss(&shared, &req).await {
+            Ok(text) => Response { ok: true, text },
+            Err(e) => Response { ok: false, text: e.to_string() },
+        }
     } else {
         match command(&shared, &req) {
             Ok(text) => Response { ok: true, text },
@@ -498,8 +594,106 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             broadcast_members(shared, &network);
             Ok(format!("Revoked \"{name}\". It has to be approved again to rejoin."))
         }
+        "trust" => {
+            let name = arg("name")?;
+            let level: u8 = arg("level")?.parse().map_err(|_| anyhow!("level must be 1, 2 or 3"))?;
+            let rights = arg("rights")?;
+            if !(1..=3).contains(&level) || !["full", "read", "talk"].contains(&rights.as_str()) {
+                bail!("level must be 1, 2 or 3 and rights one of full, read, talk");
+            }
+            let mut state = shared.state.lock().unwrap();
+            let m = state.networks.iter_mut().flat_map(|n| n.peers.iter_mut()).find(|m| m.name == name).ok_or_else(|| anyhow!("no peer named \"{name}\""))?;
+            m.level = level;
+            m.rights = rights.clone();
+            state.save()?;
+            Ok(format!("\"{name}\" now has level {level} and rights {rights} on this machine."))
+        }
+        "rooms" => Ok(rooms(shared)),
+        "accept" => {
+            let id = arg("room")?;
+            let invite = shared.invites.lock().unwrap().remove(&id).ok_or_else(|| anyhow!("no invitation for room {id}"))?;
+            start_joiner(shared, invite);
+            Ok(format!("Joined room {id}. Follow it with `agora watch {id}`."))
+        }
+        "decline" => {
+            let id = arg("room")?;
+            let invite = shared.invites.lock().unwrap().remove(&id).ok_or_else(|| anyhow!("no invitation for room {id}"))?;
+            shared.send_to(&invite.from, Msg::RoomDecline { room_id: id.clone(), reason: "declined by the user".into() });
+            Ok(format!("Declined room {id}."))
+        }
+        "say" => {
+            let id = arg("room")?;
+            let rooms = shared.rooms.lock().unwrap();
+            let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
+            room.tx.try_send(RoomEvent::Human(arg("text")?)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
+            Ok("Sent.".into())
+        }
+        "panic" => {
+            let rooms = shared.rooms.lock().unwrap();
+            for room in rooms.values() {
+                let _ = room.tx.try_send(RoomEvent::Panic);
+            }
+            let n = rooms.len();
+            shared.invites.lock().unwrap().clear();
+            Ok(format!("Stopped {n} room(s) and their sessions on this machine."))
+        }
         other => bail!("unknown command: {other}"),
     }
+}
+
+/// Opens a room and waits until it closes. Returns the result for the human.
+async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
+    let topic = req.args.get("topic").cloned().ok_or_else(|| anyhow!("missing topic"))?;
+    let turns: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(6);
+    if !(1..=30).contains(&turns) {
+        bail!("turns must be between 1 and 30");
+    }
+    let with = req.args.get("with").cloned().unwrap_or_default();
+    let mut joiners = Vec::new();
+    {
+        let state = shared.state.lock().unwrap();
+        let conns = shared.conns.lock().unwrap();
+        let all: Vec<&Member> = state.networks.iter().flat_map(|n| n.peers.iter()).collect();
+        let wanted: Vec<&str> = with.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if wanted.is_empty() {
+            joiners.extend(all.iter().filter(|m| conns.contains_key(&m.id)).map(|m| (*m).clone()));
+        }
+        for name in wanted {
+            let m = all.iter().find(|m| m.name == name).ok_or_else(|| anyhow!("no peer named \"{name}\""))?;
+            if !conns.contains_key(&m.id) {
+                bail!("peer \"{name}\" is offline");
+            }
+            joiners.push((*m).clone());
+        }
+    }
+    if joiners.is_empty() {
+        bail!("no peer is online to discuss with");
+    }
+    if shared.rooms.lock().unwrap().len() >= MAX_ROOMS {
+        bail!("already in {MAX_ROOMS} rooms");
+    }
+    let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
+    let (tx, rx) = mpsc::channel(64);
+    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: topic.clone(), role: "opened", tx });
+    eprintln!("room {id} opened: {topic}");
+    let result = room::run_opener(shared.clone(), id.clone(), topic, joiners, turns, rx).await;
+    shared.rooms.lock().unwrap().remove(&id);
+    result
+}
+
+fn rooms(shared: &Shared) -> String {
+    let mut out = String::new();
+    for (id, r) in shared.rooms.lock().unwrap().iter() {
+        out.push_str(&format!("room {id}  {}  {}\n", r.role, r.topic));
+    }
+    for (id, i) in shared.invites.lock().unwrap().iter() {
+        let from = i.participants.iter().find(|p| p.id == i.from).map(|p| p.name.as_str()).unwrap_or("?");
+        out.push_str(&format!("invitation {id} from \"{from}\": {}  (agora accept {id})\n", i.topic));
+    }
+    if out.is_empty() {
+        out.push_str("no rooms\n");
+    }
+    out
 }
 
 fn status(shared: &Shared) -> String {
@@ -528,6 +722,13 @@ fn status(shared: &Shared) -> String {
     }
     for (name, p) in pending.iter() {
         out.push_str(&format!("join request: \"{name}\" for network {}, words: {}\n", p.network, proto::words(&shared.me, &p.id)));
+    }
+    drop(pending);
+    drop(conns);
+    drop(state);
+    let r = rooms(shared);
+    if r != "no rooms\n" {
+        out.push_str(&r);
     }
     out
 }
