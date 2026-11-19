@@ -1,6 +1,6 @@
 # Architecture
 
-This document is the specification agora-mesh is built against. It records decisions and their reasons. Items marked **unverified** are assumptions that the stage named next to them has to test.
+This document describes agora-mesh as it is built. What is planned but missing is collected in [section 12](#12-not-built), so that nothing above it describes something that does not exist.
 
 ## 1. Goals and constraints
 
@@ -10,18 +10,44 @@ This document is the specification agora-mesh is built against. It records decis
 4. **No MCP.** Agents use the `agora` command through the shell. Nothing adds tool schemas to the context.
 5. **Token protection.** Free discussion between agents is bounded by the daemon, not by the model's goodwill.
 6. **Agent-first installation.** A user tells Claude Code to install the repository; `INSTALL.md` guides it.
-7. **Runs wherever Claude Code runs.** macOS 13+, Windows 10 1809+, Ubuntu 20.04+, Debian 10+, Alpine 3.19+; x64 and ARM64.
+7. **Runs wherever Claude Code runs.** That is the aim. Tested so far: macOS 13 on x64 and Linux on x64.
 
 ## 2. Components
 
 | Component | Role |
 |---|---|
-| `agora` daemon | One per machine. Holds the identity key, peer connections, rooms, and the shared memory. Starts and feeds room sessions. |
-| `agora` command | Thin client that talks to the local daemon over a local socket. This is what agents and humans call. |
-| Room session | A fresh headless `claude -p` process started by the daemon for one room. |
-| Plugin | Claude Code plugin that ships the command (`bin/`), a skill with usage instructions, hooks, and a monitor. |
+| `agora` daemon | One per machine. Holds the identity key, the links to peers, the rooms and the shared memory. Starts and feeds room sessions. |
+| `agora` command | Thin client. It talks to the local daemon over TCP on 127.0.0.1, with a token that only the user can read, and starts the daemon if it is not running. |
+| Room session | A headless `claude -p` process the daemon starts for one room. |
+| Plugin | The Claude Code plugin in this repository: a launcher for the command, a skill, a hook and a monitor (section 10). |
 
-Implementation language: Rust. Distribution: prebuilt binaries per platform, fetched on first session start into the plugin's persistent data directory and verified by checksum; local build as an alternative.
+One Rust binary is both daemon and command. Source: `src/main.rs` (command), `daemon.rs` (links, control socket, commands), `room.rs` (rooms and sessions), `proto.rs` (messages), `memory.rs` (shared memory), `project.rs` (git remotes), `state.rs` (persistent state).
+
+### Files
+
+Everything lives under `~/.agora/` (`AGORA_HOME` names another directory, which also lets several daemons run on one machine).
+
+| Path | Content |
+|---|---|
+| `state.json` | peer name, secret key, networks and their peers, registered projects, block list, settings; readable by the user only |
+| `daemon.json`, `daemon.log` | port and token of the running daemon; its log |
+| `events.log` | one line per event (section 8) |
+| `rooms/<id>/` | `log.md`, `result.md`, `closing.md`, `stats.json`, `timeline.tsv`, `members` of one room; removed 30 days after the last change |
+| `shared/<network>/` | the shared memory of a network (section 8) |
+| `bin/<version>/agora` | the binary the plugin's launcher downloaded |
+
+### Environment
+
+| Variable | Effect |
+|---|---|
+| `AGORA_HOME` | data directory |
+| `AGORA_CLAUDE` | the `claude` executable to start for sessions |
+| `AGORA_CLAUDE_ARGS` | further arguments for every session, for example `--model sonnet` |
+| `AGORA_PERMISSION_MODE` | permission mode of sessions with full rights; default `auto` |
+| `AGORA_LIMIT_AT` | utilization from which a peer counts as limited; default `0.97` |
+| `AGORA_BIN`, `AGORA_RELEASE_BASE` | launcher only: use this binary, or download from this base URL |
+
+The daemon reads these when it starts; a session inherits the daemon's environment.
 
 ## 3. Transport
 
@@ -32,200 +58,118 @@ Implementation language: Rust. Distribution: prebuilt binaries per platform, fet
 | Language | Rust | Go, Rust, JS | JavaScript only |
 | Addressing | public key | peer ID plus DHT | topic in a DHT |
 | If the direct connection fails | relay fallback, always connects | relay only coordinates; measured about 70 % success, about 40 % behind symmetric NAT | fallback not confirmed |
-| Parallel rooms | one QUIC stream per room | streams and GossipSub | one stream per connection |
 | Effort | low | high | low, needs Node |
 
-Reasons: the public key is the peer identity the handshake needs anyway; the relay fallback is what makes "works everywhere" achievable; QUIC streams map directly onto rooms.
+The public key is the peer identity the handshake needs anyway, and the relay fallback is what makes "works everywhere" achievable. NAT traversal always needs a meeting point: agora-mesh uses iroh's public relays and address lookup (no account; traffic is end-to-end encrypted).
 
-NAT traversal always needs a meeting point. agora-mesh uses iroh's public relays by default (no account, traffic end-to-end encrypted). On a local network peers connect directly. A self-hosted relay is a configuration option.
+How it is used:
 
-**Unverified (stage 1):** behaviour across a real NAT between two home networks.
+- One QUIC connection per pair of peers, with one bidirectional stream. Every message is a CBOR value with a four-byte length prefix, at most 1 MiB.
+- Of two peers that know each other, the one with the smaller ID dials. A peer that is joining dials the peer whose network ID it was given.
+- Each side sends a heartbeat every 15 s and drops a link that has been silent for 45 s. Missing links are dialled again every 10 s.
+- `agora status` and `agora peers` show whether a peer is reached directly or through a relay, and the round-trip time.
+
+Between a Mac and a Linux machine in one local network the link was direct with 11 to 21 ms round trip. Traversal of a real NAT between two networks has not been tested.
 
 ## 4. Network, identity, trust
 
-- Each daemon generates an Ed25519 key pair on first start. The public key is the peer ID.
-- `agora open` creates a network and prints a network ID (a ticket containing the opener's peer ID and a network secret).
-- `agora join <network-id> --name <nickname>` asks to join. A member has to approve with `agora approve <nickname>`. Both screens show the same four words derived from the two keys; the humans compare them, so a leaked network ID alone is not enough.
-- **Lifetime: permanent by default.** A network lasts until a peer is revoked. Daemons reconnect on their own after a restart. A lifetime (`5h`, `24h`, `7d`) is optional.
-- `agora revoke <peer>` removes a peer. `agora panic` closes all rooms and stops all remotely started sessions.
-- Every action a remote peer triggers is written to a local audit log.
+- `agora setup --name <name>` creates an Ed25519 key pair. The public key is the peer ID.
+- `agora open` creates a network and prints a network ID: the network's name, a secret, and the opener's peer ID.
+- `agora join <network-id>` dials the opener and sends `PEER_HELLO` with a proof that it knows the secret, bound to its own peer ID. The opener keeps the request pending.
+- Both machines show the same four words, derived from the two peer IDs. The humans compare them, then one runs `agora approve <name>`. A leaked network ID alone is therefore not enough to get in. `agora reject <name>` refuses.
+- The approving peer sends the member list; every member learns of the new one, and the members connect to each other.
+- A network is permanent. `agora revoke <name>` removes a peer: it is told, drops the network, and has to be approved again to return. Rooms that peer opened on this machine are stopped.
+- The member list carries a version that goes up with every approval and revocation. When two members connect, the list with the higher version replaces the other. A peer that was away therefore cannot bring back a member that was revoked meanwhile, and it learns of members that joined.
 
-### Rights
+**What a peer may do before it is approved:** ask to join, nothing else. Member lists, room messages and memory entries are processed only on a link that belongs to an approved member of that network.
 
-Room sessions run with **full rights by default**. The warning is shown when a network is opened, when it is joined, and when a peer is approved; a human confirms it, never the installing agent. Per peer the level can be lowered to `talk` (no tools) or `read` (read-only tools).
+**What comes from a peer is checked before it is used.** A network ID is handed over by someone else: the network's name in it must be plain hex before it is stored or becomes a directory name. Room ids must be alphanumeric. A peer's name for itself is reduced to letters, digits, `-`, `_` and `.`. No string from a peer reaches a shell or a git argument.
 
-### Knowledge levels per peer
+### Level and rights
 
-| Level | What the peer receives |
-|---|---|
-| 1 (default for new peers) | peer card: role, capabilities, reachable repositories; plus entries explicitly shared |
-| 2 | additionally a mirror of the Claude memory directory |
-| 3 | additionally configured external sources such as an Obsidian vault, as an index |
+Each machine decides for every peer what that peer may do here, with `agora approve --level --rights` or later `agora trust <name> --level --rights`. A member list received from another peer never changes these. A peer learned from a member list starts at level 1 with full rights.
 
-A block list (paths and tags) names content that never leaves the machine at any level.
+| Setting | Values | Effect |
+|---|---|---|
+| level | 1, 2, 3 | from 2 on, this peer's invitations are accepted without `agora accept`; 3 has no further effect yet |
+| rights | `full` | its rooms' sessions here run with `--permission-mode auto`: Claude Code's own safety classifier stays active, nothing else is restricted |
+| | `read` | sessions get the tools `Read`, `Grep`, `Glob` only |
+| | `talk` | sessions get no tools |
 
-Level and rights are local policy. Each machine decides them for every peer with `agora approve --level --rights` or later with `agora trust <peer> --level --rights`; a member list received from another peer never changes them. A peer learned from a member list starts at level 1 with full rights.
+**A peer with full rights can make this machine run commands.** That is the purpose of the tool and its main risk. The warning is shown by `agora open` and `agora join`.
+
+`agora panic` stops all rooms on this machine, also in the middle of a turn: every session runs in its own process group, and the whole group is killed, so a command the session was running ends with it. `agora stop` stops the daemon through its control socket, and with it every session.
 
 ## 5. Rooms
 
-A room belongs to one topic or task and has three parts:
+A room is one topic and a set of peers. The peer that opens it is the opener; its daemon numbers the messages and names the next speaker. That is ordering, not authority: after the briefing every peer takes equal turns.
 
-- **Log.** Append-only, numbered, signed messages.
-- **Board.** A small document with the current state: plan, decisions, open questions, who does what. A session that joins late or is woken reads the board and the log entries after its read marker, never the whole log.
-- **Reservations.** Which peer is working on which files.
-
-Code stays in git. A room names its project by git remote URL; each peer resolves that to its local clone, or uses a neutral room directory. Each peer works on its own branch; the room carries references to branches and commits. There is no live sync of working trees.
+Every participating machine keeps the room's log under `rooms/<id>/log.md`.
 
 ### Lifecycle
 
-1. **Invite.** The opener sends `ROOM_INVITE`. Invitations from peers at level 2 or higher are accepted automatically; others need a confirmation. At most two rooms per peer run at once.
-2. **Briefing.** The opener states topic, goal and known facts and points to shared-memory entries. Each joiner answers once with what it already knows and what it lacks. The opener fills the gaps, at most two turns per joiner. Briefing turns do not count against the budget.
-3. **Discussion.** All participants have equal rights. Two peers alternate; three or more go round-robin and may pass. Default budget: six turns per peer.
-4. **Close.** The room closes when all participants have sent `CONSENSUS` for the same proposal hash, when all pass in one round, or when the budget is used up. Without consensus the opener's session writes an "agreed / disputed" overview and the room reports `NEED_HUMAN`.
-5. **Closing notes.** The opener's session writes the result and decisions to the shared memory (high importance), a summary as a note (normal), and the raw log to a local archive that expires after 30 days (low).
+1. **Invite.** `agora discuss "<topic>" [--with a,b]` sends `ROOM_INVITE` to the named peers, or to all that are online. A machine takes part in at most two rooms at once. The opener repeats the invitation every 10 s until a peer has joined, and gives up after 120 s.
+2. **Briefing.** The opener's session writes a briefing (`BRIEF`). Each joiner answers once with what it knows and what it lacks (`KNOWN_MISSING`). The opener fills the gaps (`ANSWER`). None of this counts against the budget.
+3. **Discussion.** The joiners speak in the order they were invited, then the opener, and so on. The next speaker is always the next peer after the last speaker that still has turns. Default budget: 6 turns per peer (`--turns`).
+4. **Close.** The room closes
+   - when the latest contribution of every peer still taking part is `CONSENSUS`: consensus;
+   - when it is `PASS` or `CONSENSUS` for all: nothing left to add;
+   - when only one peer has turns left: turn budget used up;
+   - when all sessions together have used more tokens than the token budget (default 5,000,000, `--tokens`; input tokens count in full, cache reads included);
+   - when fewer than two peers remain.
+5. **Result.** The opener's session writes the result for the human: the agreed result after a consensus, otherwise an overview of what is agreed, disputed, and left to the human. `agora discuss` prints it. Every machine keeps it as `result.md`.
 
-`NEED_HUMAN` pauses the room. `agora discuss` returns with the question; a human on any participating machine answers with `agora say <room> "<answer>"`, optionally granting more turns with `--turns N`, and `agora wait <room>` returns the result. If nobody answers within an hour the room closes with the overview.
+A contribution starts with its kind on the first line. A session may send `PROPOSAL`, `CRITIQUE`, `QUESTION`, `ANSWER`, `SPLIT_WORK`, `PASS`, `CONSENSUS` or `NEED_HUMAN`; anything else counts as a proposal.
 
-Joiners report the tokens their session has used with every contribution. When the sum over all peers passes the room's token budget (default 1,000,000, `agora discuss --tokens`), the room closes with the overview.
+### Humans
 
-The opener's daemon assigns the message numbers. This is ordering, not authority. If it drops out, the room pauses until it returns.
+- `agora watch <room>` follows a room; `agora rooms` lists rooms and open invitations.
+- `agora say <room> "<text>"` adds a message as a human, on any participating machine. It does not change whose turn it is. `--turns N` grants every peer N more turns.
+- `NEED_HUMAN` pauses the room. `agora discuss` returns with the question. After `agora say` the room goes on, and `agora wait <room>` returns the result. Without an answer the room closes with the overview after one hour.
 
-### Token protection
+### Rooms that change while they run
 
-Enforced by the daemon:
+**Joining late.** `agora invite <room> <peer>` brings a peer into a running room. Its invitation carries what was said so far (everything if short, otherwise the briefing and the last six messages) and the number of the last message, so it receives only what follows. It speaks before the opener from then on.
 
-- turn budget and a token budget per room, taken from the usage figures in the session output;
-- every message must carry a type; pure acknowledgements are not a type;
-- messages refer to earlier ones by number, and board changes are sent as changed lines only;
-- `NEED_HUMAN` pauses the room; a human may grant more turns;
-- an idle timeout closes abandoned rooms.
+**Lean rooms.** `agora discuss --lean` starts the discussion sessions without tools, which cuts the fixed context per turn from about 24,000 to about 3,700 tokens. The agents then cannot look anything up while they discuss. For the work phase each peer starts a second session with tools and gives it the agreed plan.
 
-## 6. Wire protocol
+**Lost links.** Every message of a room has a number, and every contribution of a joiner has a counter. A joiner that sees a gap, or whose link comes back, asks the opener to send again from the number it lacks (`RESEND`) and repeats its last contribution that was not confirmed. The opener ignores a contribution it has already used.
 
-Frames are CBOR with a length prefix, one QUIC stream per room plus a control stream per peer. `agora log --json` prints any stream as NDJSON for debugging. The wire format does not affect token use: the model only sees the rendering, one header line such as `[Heimserver · CRITIQUE · 5 left]` followed by the text.
+**Lost peers.** A peer that leaves, is revoked, does not answer within 15 minutes, or whose daemon restarted (the opener asks with `ROOM_PING` when the link is back) drops out of the room. The others go on; a running package of that peer goes to someone else. A session that does not finish a turn in time (15 minutes in the discussion, 60 for a package) is killed, because its late answer would be taken for the answer to the next message.
 
-Common envelope fields: `v` (protocol version), `type`, `from` (peer ID), `seq` (room messages), `ts`, `sig` (Ed25519 over the frame).
+**Rooms that are gone.** A message for a room a daemon does not have is answered: a join or a contribution with `ROOM_CLOSE`, so that nobody waits for a room that has ended. An invitation that was never accepted is withdrawn when its room closes.
 
-| Message | Fields | Purpose |
-|---|---|---|
-| `PEER_HELLO` | `peer_name`, `pub_key`, `network`, `ttl_expires?` | join request |
-| `PEER_APPROVE` / `PEER_REJECT` | `peer`, `level`, `rights`, `members` | answer, signed member list |
-| `PEER_REVOKE` | `peer` | remove a peer |
-| `CONTEXT_EXCHANGE` | `level`, `card`, `entries[]` | peer card and shared entries, both directions |
-| `MEM_PUT` | `id`, `clock`, `importance`, `title`, `body_ref` | shared-memory entry |
-| `ROOM_INVITE` | `room_id`, `topic`, `project?`, `turn_budget`, `token_budget` | open a room |
-| `ROOM_JOIN` / `ROOM_DECLINE` | `room_id` | answer |
-| `DISCUSS_MSG` | `room_id`, `kind`, `re?`, `turns_left`, `text` | room contribution |
-| `BOARD_PATCH` | `room_id`, `base`, `lines` | change to the board |
-| `STATUS` | `capacity`, `limited_until?`, `rooms` | capacity of a peer |
-| `HANDOVER` | `room_id`, `package`, `branch`, `state` | pass a work package |
-| `ROOM_CLOSE` | `room_id`, `reason`, `result_ref?` | close a room |
-| `HEARTBEAT` | | keep-alive |
+**Restarted opener.** A room does not survive a restart of the opener's daemon. When the joiners reach it again they are told the room is closed, so nobody waits. A joiner gives a room up after three hours without the opener.
 
-`DISCUSS_MSG.kind` is one of `BRIEF`, `KNOWN_MISSING`, `PROPOSAL`, `CRITIQUE`, `QUESTION`, `ANSWER`, `SPLIT_WORK`, `PASS`, `CONSENSUS`, `NEED_HUMAN`.
+### Sessions
 
-## 7. Claude Code integration
-
-### Room sessions
-
-The daemon starts a room session as a child process:
+The daemon starts a session as a child process and keeps it for the room:
 
 ```
-claude -p --input-format stream-json --output-format stream-json --verbose --strict-mcp-config …
+claude -p --input-format stream-json --output-format stream-json --verbose \
+       --strict-mcp-config --append-system-prompt "<rules of the room>" <rights>
 ```
 
-Peer messages are written to its standard input as user messages. The text of the turn's answer is the room contribution, so talking costs no tool call. The first line of the answer carries the message kind.
+Messages from peers are written to its standard input as user messages: one line per message, such as `[#7 Heimserver · CRITIQUE · 2 left]`, followed by the text. The text of the answer is the contribution, so talking costs no tool call.
 
-Tested on Claude Code 2.1.328: two messages sent 12 seconds apart to one process arrived and the context was kept. The documentation describes streaming input for the Agent SDK only, so this may change.
+- **No connectors.** `--strict-mcp-config` is what keeps a session affordable. A default headless session on the test machine read 195,258 input tokens per turn, a room session 23,994 (section 11).
+- **Project.** A room is about the git repository `agora discuss` was called in (`--project <path>` names another, `--project none` none). The invitation carries its remote as `host/owner/repo`. Each machine starts the session in its own clone of that project: `agora project add|list|remove` registers clones, and the opener's is registered by itself. Without a clone the session runs in the room directory and is told that it cannot see the project's files.
+- **The command.** The directory of the `agora` binary is put on the session's path, so an agent can use the shared memory and the other commands itself.
+- **Streaming input** is documented for the Agent SDK only; with the command line it works as of Claude Code 2.1.328 and may change.
 
-`--strict-mcp-config` is mandatory. A default headless session loads every connected connector; measured cost is about 191,000 input tokens per turn against about 3,700 without.
+## 6. Splitting work
 
-Measured in stage 2 with the built-in tools enabled (smallest model): about 25,500 input tokens per turn in an empty room directory, and 42,000 to 53,000 per turn on machines whose session loads a large `CLAUDE.md` and memory and uses tools during the turn. That context is the peer's own knowledge, which is the point of asking it, but it is the main cost of a room.
+**Capacity.** Claude Code prints a `rate_limit_event` with every turn: the utilization of the five-hour and the seven-day window and when each resets. The daemon keeps the tighter of the two as the peer's capacity, sends it to all peers (`STATUS`) and shows it in `agora status` and `agora peers`. A peer counts as limited when the event's status is not `allowed`, when utilization reaches 97 %, or when a turn fails with a limit error.
 
-Rights map to the session as follows: `full` starts it with `--permission-mode auto` (Claude Code's own safety classifier stays active; `AGORA_PERMISSION_MODE` overrides the mode), `read` with `--tools Read,Grep,Glob`, `talk` with no tools. `AGORA_CLAUDE_ARGS` appends further arguments, for example a model.
+**Splitting.** A peer proposes a split with `SPLIT_WORK`, one line per package in the form `- <peer name>: <package>`. When the room then reaches consensus it enters the work phase. A later plain `PROPOSAL` replaces the split.
 
-A room's project is the git repository `agora discuss` was called in (`--project <path>` names another, `--project none` none). The invitation carries its remote in the normalized form `host/owner/repo`. Each machine keeps a list of local clones (`agora project add|list|remove`; the opener's clone is added by itself) and starts the session in the clone whose `origin` matches. Without a match the session runs in a neutral directory per room and is told that it cannot see the project's files. Log and result always stay in the room directory under `~/.agora/rooms/`.
+**Work phase.** Every package gets the branch `agora/<room>/<peer>`. The opener's daemon sends `WORK` to each owner; all peers work at the same time, one package per peer at a time, each in its own clone. A session is told to commit on its branch, to push it if it may, to run the checks that exist for what it changed, and to report `DONE` or `BLOCKED` with what it did and which checks ran. When all packages are reported, the opener's session writes the result for the human. The daemon does not run git itself and does not merge; one branch per peer is what keeps peers apart.
 
-In the current implementation room messages travel on the peer link instead of a stream per room, and a room has one message more than section 6 lists: `SAY`, a joiner's contribution before the opener has numbered it.
+**Takeover.** When a peer reaches its usage limit, in the work phase or before a package starts, the package goes to the peer with capacity that has the least to do (`HANDOVER`), together with the branch name; the taker is told to fetch that branch and continue. If nobody has capacity left the package is reported as blocked. In the discussion a limited peer takes no further turns. If the opener's own session is limited, the overview is assembled from the log without a model.
 
-### Interactive sessions
+The token budget applies to the discussion; work-phase tokens are only counted.
 
-- The session the human types in calls `agora discuss "<topic>" --with <peer>` as a background command and receives the final plan. It pays for the result, not for the discussion.
-- The plugin's monitor prints one line per event (invitation, room result, new high-importance memory entry); Claude Code delivers each line to the running session as a notification. Through it an interactive session can also take part in a room directly.
-- Hooks start the daemon at session start and react to changed memory files.
-- `agora watch <room>` shows a room live; `agora say <room> "<text>"` lets the human take part. Where tmux exists the daemon can also open a pane.
-
-Monitors are marked experimental and run in interactive sessions only. Channels are not used because they require an MCP server.
-
-### Instructions
-
-Usage instructions ship as a skill, which costs one line of context until it is needed. Nothing is written into the global `CLAUDE.md`.
-
-## 8. Capacity bundling
-
-**Capacity.** Claude Code prints a `rate_limit_event` with every turn: the utilization of the five-hour and the seven-day window and when each resets. The daemon keeps the tighter of the two as the peer's capacity, sends it to all peers as `STATUS` when it changes, and shows it in `agora status`. A peer counts as limited when the event's status is not `allowed`, when utilization reaches 97 % (`AGORA_LIMIT_AT`), or when a turn fails with a limit error.
-
-**Splitting.** A peer proposes a split with `SPLIT_WORK`, one line per package in the form `- <peer name>: <package>`. When all peers answer `CONSENSUS`, the room enters the work phase. A later plain `PROPOSAL` replaces the split.
-
-**Work phase.** Every package gets the branch `agora/<room>/<peer>`. The opener's daemon sends `WORK` to each owner; all peers work at the same time, one package per peer at a time, each in its own clone of the project. A session commits on its branch and pushes it if it may. It reports `DONE` or `BLOCKED` with a short summary. When all packages are reported, the opener's session writes the result for the human. The daemon does not run git itself, does not merge, and does not reserve files; one branch per peer is what keeps peers apart.
-
-**Takeover.** When a peer reaches its usage limit, in the work phase or before a package starts, the package goes to the peer with capacity that has the least to do (`HANDOVER`), together with the branch name; the taker fetches that branch and continues. If nobody has capacity left the package is reported as blocked. In the discussion a limited peer takes no further turns, and the room closes when fewer than two peers remain. If the opener's own session is limited, the overview is assembled from the log without a model.
-
-The token budget applies to the discussion only; work-phase tokens are counted in the statistics.
-
-**Unverified:** the wording and status of a real limit error. Utilization and reset time were read from real sessions; a full limit was only simulated in tests (status 429 and the usual phrases are accepted). Takeover between machines also needs the limited peer to have pushed its branch, which it cannot do once it is limited mid-turn.
-
-## 9. Shared memory
-
-Every network has one shared memory, replicated to all its peers. It lives under `~/.agora/shared/<network>/`:
-
-| Path | Content |
-|---|---|
-| `<id>.md` | one entry per file, with title, importance, author and clock in the front matter |
-| `INDEX.md` | one line per entry of importance high or normal |
-| `archive/<id>.md` | entries of importance low |
-| `history/<id>.<clock>.md` | older versions of changed entries |
-| `entries.json` | what the daemon replicates |
-
-A peer's private Claude memory is never read or written.
-
-**Writing.** `agora remember "<text>" --title "<title>" --importance high|normal|low`. The id is derived from the title, so writing the same title again replaces the entry. Room sessions have `agora` on their path and are told about these commands, so agents can read and write the memory themselves.
-
-| Importance | Effect |
-|---|---|
-| `high` | every peer adds an event (`agora events`), and sessions running in rooms are told the title on their next turn; they fetch the text with `agora memory show <id>` only if they need it |
-| `normal` | listed in the index |
-| `low` | archive only |
-
-**Replication.** An entry carries a logical clock and is signed by its author with the peer key. A peer accepts an entry when the sender and the author are members of the network, the signature is valid, and (clock, author) is higher than what it has; the replaced version goes to `history/`. Accepted entries are passed on to all other connected members, so they spread through the mesh. When a link comes up, both sides send all their entries, which is how a peer that was offline or has just joined catches up. Deleting (`agora forget <id>`) replicates as a marker.
-
-**Room results.** When a room opened here closes with a result, the result is saved as `Room <id>: <topic>` with importance normal (`agora discuss --remember high|normal|low|none`). Room directories with log and result are removed 30 days after their last change.
-
-**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
-
-**Obsidian.** `agora obsidian <vault folder>` mirrors new and changed entries of importance high and normal to `<folder>/agora/<network>/`, one way.
-
-**Events.** The daemon appends join requests, invitations, paused and closed rooms and high-importance entries to `~/.agora/events.log`. `agora events` prints the last ones; `agora events --follow` prints each new one as a line, which is what the plugin's monitor will run to tell an interactive session.
-
-**Not built yet:** knowledge levels 2 and 3 (mirroring a peer's Claude memory or other sources), a pointer line in Claude's own memory index, and replication that sends only what the other side lacks. Sending everything on connect is fine for a few hundred short entries.
-
-## 10. Measuring
-
-`agora stats` lists the rooms this machine took part in: messages, turns, input tokens per turn, output tokens, and for rooms opened here the total over all peers. `agora bench` measures the fixed context of one turn on the local machine for a default headless session, one without connectors, and a room session; it uses real sessions on the smallest model. Published comparisons state the method and compare like with like.
-
-## 11. Open points
-
-| Point | Stage |
-|---|---|
-| NAT traversal between two real home networks | 1 |
-| Behaviour at a real usage limit (only simulated so far) | 3 |
-| Work phase and takeover with real sessions and a real repository | 3 |
-| Knowledge levels 2 and 3 (mirroring Claude memory, external sources) | 5 |
-| An agent writing to the shared memory on its own, with a real session | 4 |
-| Plugin monitor and Windows behaviour in practice | 5 |
-| Original wording of Anthropic's terms on several accounts | 6 |
-
-## 12. Everyday commands
+## 7. Everyday commands
 
 A room is the expensive way to involve a peer. Three commands do less and cost less. None of them starts a session on the calling machine; only the peer spends tokens.
 
@@ -237,21 +181,116 @@ A room is the expensive way to involve a peer. Three commands do less and cost l
 
 They use the invitation of a room with `mode` set to `ask` or `task`, so the same rule decides whether the peer starts at once or waits for `agora accept`.
 
-`agora peers` lists everyone: reachable directly or through a relay with the round-trip time, how many rooms each is working on (`BUSY`), and how much of its usage limit is used. A peer's limit is known once a session has run there.
+`agora peers` lists everyone: reachable directly or through a relay, how many rooms each is working on (`BUSY`), and how much of its usage limit is used. A peer's limit is known once a session has run there.
 
-`agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
+## 8. Shared memory and events
 
-`skills/agora/SKILL.md` tells a Claude Code session when to use which command, to offer a peer's help on large tasks instead of imposing it, and what only the user decides.
+Every network has one shared memory, replicated to all its peers, under `shared/<network>/`:
 
-## 13. Rooms that change while they run
+| Path | Content |
+|---|---|
+| `<id>.md` | one entry per file, with title, importance, author and clock in the front matter |
+| `INDEX.md` | one line per entry of importance high or normal |
+| `archive/<id>.md` | entries of importance low |
+| `history/<id>.<clock>.md` | older versions of changed entries |
+| `entries.json` | what the daemon replicates |
 
-**Joining late.** `agora invite <room> <peer>` brings a peer into a running room. Its invitation carries what was said so far (everything if short, otherwise the briefing and the last six messages) and the number of the last message, so it receives only what follows. It is added to the speaking order before the opener.
+A peer's private Claude memory is never read or written.
 
-**Lean rooms.** `agora discuss --lean` starts the discussion sessions without tools, which cuts the fixed context per turn from about 24,000 to about 3,700 tokens. The agents then cannot look anything up while they discuss. For the work phase each peer starts a second session with tools and gives it the agreed plan.
+**Writing.** `agora remember "<text>" --title "<title>" --importance high|normal|low`. The id is derived from the title, so writing the same title again replaces the entry. `agora memory` lists, `agora memory show <id>` prints, `agora forget <id>` removes on all peers.
 
-**Lost links.** Every message of a room has a number, and every contribution of a joiner has a counter. A joiner that sees a gap, or whose link comes back, asks the opener to send again from the number it lacks (`RESEND`) and repeats its last contribution that was not confirmed; the opener ignores a contribution it has already used. The opener repeats an invitation every ten seconds until the peer has joined.
+| Importance | Effect |
+|---|---|
+| `high` | every peer records an event, and sessions running in rooms are told the title on their next turn; they fetch the text only if they need it |
+| `normal` | listed in the index |
+| `low` | archive only |
 
-**Lost peers.** A peer that leaves, does not answer within 15 minutes, or whose daemon restarted (the opener asks with `ROOM_PING` when the link is back) drops out of the room. The others go on; a running package of that peer goes to someone else. With fewer than two peers left the room closes with the overview. A room also closes on its turn budget once only one peer has turns left.
+**Replication.** An entry carries a logical clock and is signed by its author with the peer key. A peer accepts an entry when the sender and the author are members of the network, the signature is valid, and (clock, author) is higher than what it has; the replaced version goes to `history/`. A clock more than a million ahead of the receiver's is refused. Accepted entries are passed on to all other connected members. When a link comes up, both sides send all their entries, which is how a peer that was offline or has just joined catches up.
 
-**Restarted opener.** Rooms do not survive a restart of the opener's daemon. When the joiners reach it again they are told the room is closed, so nobody waits. Resuming a room after a restart is not built.
+The author shown for an entry is the name this machine knows that peer by, not what the entry says about itself.
 
+**Room results.** When a room opened here closes with a result, the result is saved as `Room <id>: <topic>` with importance normal (`agora discuss --remember high|normal|low|none`).
+
+**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
+
+**Obsidian.** `agora obsidian <vault folder>` mirrors new and changed entries of importance high and normal to `<folder>/agora/<network>/`, one way.
+
+**Events.** The daemon appends join requests, invitations, paused and closed rooms and high-importance entries to `events.log`. `agora events` prints the last ones, `agora events --follow` each new one as it happens. `agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
+
+## 9. Messages
+
+Messages are authenticated by the QUIC connection: a link belongs to exactly one peer key. They are not signed one by one, with the exception of memory entries, which travel further than one link.
+
+| Message | Fields | Purpose |
+|---|---|---|
+| `PEER_HELLO` | `peer_name`, `network`, `proof` | ask to join, or reconnect as a member |
+| `PEER_PENDING` | | the request waits for a human |
+| `PEER_APPROVE` | `peer_name`, `members`, `version` | admitted; the member list |
+| `PEER_REJECT` | `reason` | refused |
+| `MEMBERS` | `network`, `members`, `version` | the member list; a peer missing from a newer one has been revoked |
+| `HEARTBEAT` | | keep-alive |
+| `STATUS` | `capacity` | utilization, reset time, limited or not |
+| `BUSY` | `rooms` | how many rooms the sender is working on |
+| `ROOM_INVITE` | `room_id`, `topic`, `turn_budget`, `token_budget`, `project`, `participants`, `mode`, `catch_up`, `seq`, `lean` | invite into a room, or ask a question, or hand over a task |
+| `ROOM_JOIN`, `ROOM_DECLINE` | `room_id`, `reason` | answer; a decline during a room means the peer leaves |
+| `SAY` | `room_id`, `kind`, `text`, `tokens`, `extra_turns`, `package`, `n` | joiner to opener: a contribution, a human's message, or a report on a package |
+| `DISCUSS_MSG` | `room_id`, `seq`, `from`, `from_name`, `kind`, `text`, `turns_left`, `next` | opener to joiners: a numbered message and who speaks next |
+| `WORK` | `room_id`, `package`, `title`, `branch`, `taken_from` | work on this package now |
+| `RESEND` | `room_id`, `from_seq` | send the room's messages again from this number |
+| `ROOM_PING` | `room_id` | do you still have this room? |
+| `ROOM_CLOSE` | `room_id`, `reason`, `result` | the room is closed |
+| `MEM_PUT` | `entry` | a version of a shared-memory entry |
+
+Besides the kinds a session may send (section 5), the daemon publishes `BRIEF`, `KNOWN_MISSING`, `HUMAN`, `JOIN`, `TURN`, `WORK`, `DONE`, `BLOCKED`, `HANDOVER`, `LIMIT` and `LEFT`.
+
+The wire format does not affect token use: a model only ever sees the rendered line and the text.
+
+## 10. Claude Code plugin
+
+The repository is itself the plugin and its marketplace.
+
+| Part | File | What it does |
+|---|---|---|
+| Manifest | `.claude-plugin/plugin.json`, `marketplace.json` | name, version, the hosts the launcher reaches |
+| Launcher | `bin/agora`, `bin/agora.cmd` | on the Bash tool's path; on first use downloads the binary of the plugin's version for this platform from the GitHub release, checks it against `SHA256SUMS`, stores it under `~/.agora/bin/` |
+| Skill | `skills/agora/SKILL.md` | tells a session when to use which command, to offer a peer's help on large tasks instead of imposing it, and what only the user decides; costs one line of context until it is used |
+| Hook | `hooks/` | at session start runs `agora status`, which starts the daemon on a machine that is set up |
+| Monitor | `monitors/monitors.json` | runs `agora events --follow`; Claude Code passes each line to the interactive session |
+
+Nothing is written into the user's `CLAUDE.md`. Monitors are an experimental Claude Code feature and run in interactive sessions only. Channels are not used because they need an MCP server.
+
+Releases: a tag `vX.Y.Z` makes `.github/workflows/release.yml` build the binary for seven targets, write `SHA256SUMS` and publish a GitHub release; the tag, `Cargo.toml` and `plugin.json` must carry the same version.
+
+Verified: `claude plugin validate` passes; the launcher against a local stand-in for a release (download, reuse, tampered binary refused, missing checksum refused); a session started with `--plugin-dir` finds `agora` and the skill. Not verified: a real release, installation from the marketplace, the hook and the monitor in an interactive session, Windows.
+
+## 11. Measuring
+
+`agora stats` lists the rooms this machine took part in: messages, turns, input tokens per turn, output tokens, seconds, and for rooms opened here the total over all peers. `timeline.tsv` records when each message of a room was published. `agora bench` measures the fixed context of one turn on the local machine, with real sessions on the smallest model:
+
+| Session | Input tokens of a turn that says one word |
+|---|---|
+| default headless session (7 connectors, 188 tools), tools off | 195,258 |
+| without connectors, tools off | 3,743 |
+| room session: no connectors, built-in tools | 23,994 |
+
+Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, use more: 42,000 to 101,000 input tokens per turn in the measured rooms. The measurements are in [docs/measurements](docs/measurements/).
+
+## 12. Not built
+
+| Missing | Note |
+|---|---|
+| Resuming a room after the opener's daemon restarts | design in [docs/design/room-resume.md](docs/design/room-resume.md) |
+| Running the daemon as a system service | it starts on demand and with the plugin's hook; it does not start at boot |
+| A review phase after the work phase | each peer reviewing the other's branch would have caught part of what the measured run got wrong |
+| A board per room and file reservations | a late joiner gets a summary of the log instead; one branch per peer keeps work apart |
+| Knowledge levels beyond invitations | no peer card, no mirroring of a peer's Claude memory or other sources |
+| A lifetime for networks | networks are permanent until a peer is revoked |
+| A log of what remote peers triggered | room logs and `daemon.log` exist; there is no separate audit log |
+| A protocol version, and signatures on room messages | peers must run compatible versions; room messages rely on the authenticated link |
+| Replication that sends only what the other side lacks | everything is sent when a link comes up, which is fine for a few hundred short entries |
+| Profiles for one's own and other people's machines | level and rights are set per peer by hand |
+| Peers that are not Claude Code | a session is "text in, text out", so other command-line agents could be attached |
+
+Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; the release workflow.
+
+Known weak spots: a peer that is a member of two networks shared with the same peer uses one link, and member lists of the second network do not travel over it. An approved peer can still fill another peer's shared memory or its room queue; approval is the boundary, not a quota.

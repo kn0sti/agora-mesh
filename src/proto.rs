@@ -25,11 +25,22 @@ pub enum Msg {
     #[serde(rename = "PEER_PENDING")]
     Pending,
     #[serde(rename = "PEER_APPROVE")]
-    Approve { peer_name: String, members: Vec<Member> },
+    Approve {
+        peer_name: String,
+        members: Vec<Member>,
+        /// Counts the changes to the member list; the higher one is the newer list.
+        #[serde(default)]
+        version: u64,
+    },
     #[serde(rename = "PEER_REJECT")]
     Reject { reason: String },
     #[serde(rename = "MEMBERS")]
-    Members { network: String, members: Vec<Member> },
+    Members {
+        network: String,
+        members: Vec<Member>,
+        #[serde(default)]
+        version: u64,
+    },
     #[serde(rename = "HEARTBEAT")]
     Heartbeat,
     /// Opener to joiner: start a fresh session for this topic.
@@ -214,6 +225,18 @@ pub async fn read_msg(recv: &mut RecvStream) -> Result<Msg> {
     Ok(ciborium::from_reader(buf.as_slice())?)
 }
 
+/// Network ids are generated as hex. One that arrives in a network ID or a
+/// message must look the same before it is stored or used in a path.
+pub fn valid_network_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A peer's own name for itself, reduced to what is safe to show and to type.
+pub fn clean_name(name: &str) -> String {
+    let out: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).take(32).collect();
+    if out.is_empty() { "peer".to_string() } else { out }
+}
+
 /// Proof that a joiner knows the network secret, bound to its own id.
 pub fn proof(secret: &str, joiner_id: &str) -> String {
     blake3::hash(format!("agora-join|{secret}|{joiner_id}").as_bytes()).to_hex().to_string()
@@ -301,6 +324,16 @@ mod tests {
         assert!(Capacity::from_event(&full).unwrap().limited);
         let near = serde_json::json!({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.99, "resetsAt": 5}}});
         assert!(Capacity::from_event(&near).unwrap().limited);
+    }
+
+    #[test]
+    fn names_and_network_ids_from_peers_are_checked() {
+        assert_eq!(clean_name("Heim server\n\"; rm -rf ~"), "Heimserverrm-rf");
+        assert_eq!(clean_name("\n\t"), "peer");
+        assert_eq!(clean_name(&"x".repeat(100)).len(), 32);
+        assert!(valid_network_id("0a1b2c3d4e5f"));
+        assert!(!valid_network_id("../../.claude"));
+        assert!(!valid_network_id(""));
     }
 
     #[test]

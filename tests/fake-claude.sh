@@ -4,6 +4,7 @@
 #   FAKE_STUBBORN=1  never agrees, to test the budgets
 #   FAKE_ASK=1       asks a human on its first turn, agrees once a human answered
 #   FAKE_SPLIT=1     proposes a split of the work on its first turn
+#   FAKE_SPLIT=2     the same, with two packages for the opener
 #   FAKE_LIMIT=1     fails with a usage-limit error when asked to work on a package
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
 #   FAKE_DELAY       seconds to wait before every answer
@@ -57,6 +58,7 @@ while IFS= read -r line; do
       elif [ "$human" = 1 ]; then answer "CONSENSUS\\nAgreed with the human's answer."
       elif [ "${FAKE_ASK:-0}" = 1 ] && [ "$n" = 1 ]; then answer "NEED_HUMAN\\nWhich database should we use?"
       elif [ "${FAKE_SPLIT:-0}" = 1 ] && [ "$n" = 1 ]; then answer "SPLIT_WORK\\n- Mac: backend\\n- Heimserver: frontend"
+      elif [ "${FAKE_SPLIT:-0}" = 2 ] && [ "$n" = 1 ]; then answer "SPLIT_WORK\\n- Mac: backend\\n- Mac: docs\\n- Heimserver: frontend"
       elif [ "$n" = 1 ]; then answer "PROPOSAL\\nDo it in two steps."
       else answer "CONSENSUS\\nAgreed."
       fi ;;

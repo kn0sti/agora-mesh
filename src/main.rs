@@ -65,11 +65,11 @@ enum Cmd {
     /// Set what a peer may do on this machine
     Trust {
         name: String,
-        /// Knowledge level 1, 2 or 3; from 2 on, room invitations are accepted automatically
-        #[arg(long, default_value = "1")]
+        /// 1, 2 or 3; from 2 on, this peer's invitations are accepted automatically. Unchanged if not given
+        #[arg(long, default_value = "")]
         level: String,
-        /// full, read or talk
-        #[arg(long, default_value = "full")]
+        /// full, read or talk: what this peer's sessions may do here. Unchanged if not given
+        #[arg(long, default_value = "")]
         rights: String,
     },
     /// Open a room, let the agents discuss, and print their result
@@ -82,7 +82,7 @@ enum Cmd {
         #[arg(long, default_value = "6")]
         turns: String,
         /// Token budget of the whole room, all peers together
-        #[arg(long, default_value = "1000000")]
+        #[arg(long, default_value = "5000000")]
         tokens: String,
         /// Git repository the room is about; default: the one you are in. "none" for no project
         #[arg(long, default_value = "")]
@@ -490,20 +490,26 @@ fn watch(room: &str) -> Result<()> {
     }
 }
 
+/// Asks the daemon to stop and waits until it has. The request goes through
+/// the control socket, so it can only reach the daemon that owns this data
+/// directory, never another process that happens to have its old pid.
 fn stop() -> Result<()> {
-    let Some(info) = read_info() else {
+    let Some((mut stream, info)) = connect() else {
+        // Nothing answers: at most a file left behind by a daemon that died.
+        let _ = std::fs::remove_file(DaemonInfo::path());
         say!("The daemon is not running.");
         return Ok(());
     };
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill").arg("-INT").arg(info.pid.to_string()).status()?;
+    let req = Request { token: info.token, cmd: "shutdown".into(), args: HashMap::new() };
+    stream.write_all(format!("{}\n", serde_json::to_string(&req)?).as_bytes())?;
+    let mut line = String::new();
+    let _ = BufReader::new(stream).read_line(&mut line);
+    for _ in 0..50 {
+        if TcpStream::connect_timeout(&([127, 0, 0, 1], info.port).into(), Duration::from_millis(200)).is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    #[cfg(not(unix))]
-    {
-        std::process::Command::new("taskkill").args(["/PID", &info.pid.to_string(), "/F"]).status()?;
-        let _ = std::fs::remove_file(DaemonInfo::path());
-    }
-    say!("Stopped the daemon (pid {}).", info.pid);
+    say!("Stopped the daemon.");
     Ok(())
 }

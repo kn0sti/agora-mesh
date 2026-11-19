@@ -7,14 +7,27 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Result, anyhow, bail};
 use iroh::{EndpointId, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
+use crate::proto::valid_network_id;
 use crate::state::home;
 
 pub const IMPORTANCE: [&str; 3] = ["high", "normal", "low"];
+
+/// How far ahead of this machine's highest clock a received entry may be. A
+/// peer that was offline for a long time is ahead by what it wrote meanwhile.
+const MAX_CLOCK_JUMP: u64 = 1_000_000;
+
+/// One writer at a time: entries arrive on several links at once, and every
+/// change reads, modifies and rewrites the whole store.
+static STORE: Mutex<()> = Mutex::new(());
+
+/// Looks up the name this machine knows a peer by.
+pub type Names<'a> = &'a dyn Fn(&str) -> String;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemEntry {
@@ -24,6 +37,8 @@ pub struct MemEntry {
     pub clock: u64,
     /// Peer id of the author.
     pub author: String,
+    /// What the author calls itself. Never shown: the name this machine knows
+    /// the author by is, because a peer could put anything here.
     pub author_name: String,
     pub importance: String,
     pub title: String,
@@ -35,12 +50,18 @@ pub struct MemEntry {
 }
 
 impl MemEntry {
+    /// What the signature covers. Every field is prefixed with its length, so
+    /// that text cannot move from one field into the next.
     fn digest(&self) -> [u8; 32] {
-        let text = format!(
-            "agora-mem|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-            self.network, self.id, self.clock, self.author, self.author_name, self.importance, self.deleted, self.title, self.body
-        );
-        *blake3::hash(text.as_bytes()).as_bytes()
+        let mut h = blake3::Hasher::new();
+        h.update(b"agora-mem-2");
+        let clock = self.clock.to_string();
+        let deleted = if self.deleted { "1" } else { "0" };
+        for field in [&self.network, &self.id, &clock, &self.author, &self.author_name, &self.importance, deleted, &self.title, &self.body] {
+            h.update(&(field.len() as u64).to_be_bytes());
+            h.update(field.as_bytes());
+        }
+        *h.finalize().as_bytes()
     }
 
     pub fn sign(&mut self, key: &SecretKey) {
@@ -59,29 +80,47 @@ impl MemEntry {
         (self.clock, &self.author) > (other.clock, &other.author)
     }
 
-    fn render(&self) -> String {
+    fn render(&self, names: Names) -> String {
         format!(
             "---\ntitle: {}\nid: {}\nimportance: {}\nauthor: {}\nclock: {}\n---\n\n{}\n",
             self.title.replace('\n', " "),
             self.id,
             self.importance,
-            self.author_name,
+            names(&self.author).replace('\n', " "),
             self.clock,
             self.body.trim_end()
         )
     }
 }
 
-pub fn dir(network: &str) -> PathBuf {
-    home().join("shared").join(network)
+/// The directory of a network's memory. The network id comes from a network
+/// ID a peer handed over, so it is checked before it becomes part of a path.
+pub fn dir(network: &str) -> Result<PathBuf> {
+    if !valid_network_id(network) {
+        bail!("invalid network id");
+    }
+    Ok(home().join("shared").join(network))
 }
 
+/// The entries of a network. An unreadable store is an error, so that it is
+/// not mistaken for an empty one and overwritten.
+fn load_strict(network: &str) -> Result<BTreeMap<String, MemEntry>> {
+    let path = dir(network)?.join("entries.json");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = std::fs::read_to_string(&path)?;
+    serde_json::from_str(&text).map_err(|e| anyhow!("{} is damaged ({e}); move it away to start over", path.display()))
+}
+
+/// The entries of a network for reading; empty if there are none or the store is unreadable.
 pub fn load(network: &str) -> BTreeMap<String, MemEntry> {
-    std::fs::read_to_string(dir(network).join("entries.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    let _guard = STORE.lock().unwrap();
+    load_strict(network).unwrap_or_default()
 }
 
 fn save(network: &str, entries: &BTreeMap<String, MemEntry>) -> Result<()> {
-    let d = dir(network);
+    let d = dir(network)?;
     std::fs::create_dir_all(&d)?;
     let tmp = d.join("entries.json.tmp");
     std::fs::write(&tmp, serde_json::to_string(entries)?)?;
@@ -99,17 +138,34 @@ pub fn slug(title: &str) -> String {
             out.push('-');
         }
     }
-    let out = out.trim_end_matches('-');
-    let out: String = out.chars().take(60).collect();
-    if out.is_empty() { "note".to_string() } else { out }
+    let out: String = out.trim_end_matches('-').chars().take(60).collect();
+    if out.is_empty() {
+        // A title without a single ASCII letter or digit: tell such titles apart.
+        format!("note-{}", &blake3::hash(title.as_bytes()).to_hex()[..8])
+    } else {
+        out
+    }
 }
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Builds a new, signed version of an entry written on this machine.
-pub fn compose(network: &str, key: &SecretKey, author_name: &str, title: &str, body: &str, importance: &str, deleted: bool) -> Result<MemEntry> {
+/// Writes an entry from this machine: next clock, signature, storage. `id`
+/// names an existing entry to change; without it the id comes from the title.
+#[allow(clippy::too_many_arguments)]
+pub fn write_local(
+    network: &str,
+    key: &SecretKey,
+    author_name: &str,
+    id: Option<&str>,
+    title: &str,
+    body: &str,
+    importance: &str,
+    deleted: bool,
+    mirror: Option<&str>,
+    names: Names,
+) -> Result<MemEntry> {
     if !IMPORTANCE.contains(&importance) {
         bail!("importance must be one of high, normal, low");
     }
@@ -117,10 +173,12 @@ pub fn compose(network: &str, key: &SecretKey, author_name: &str, title: &str, b
     if title.is_empty() {
         bail!("an entry needs a title or a text");
     }
-    let clock = load(network).values().map(|e| e.clock).max().unwrap_or(0) + 1;
+    let _guard = STORE.lock().unwrap();
+    let mut entries = load_strict(network)?;
+    let clock = entries.values().map(|e| e.clock).max().unwrap_or(0).checked_add(1).ok_or_else(|| anyhow!("the memory's clock is exhausted"))?;
     let mut e = MemEntry {
         network: network.to_string(),
-        id: slug(title),
+        id: id.map(str::to_string).unwrap_or_else(|| slug(title)),
         clock,
         author: key.public().to_string(),
         author_name: author_name.to_string(),
@@ -131,17 +189,29 @@ pub fn compose(network: &str, key: &SecretKey, author_name: &str, title: &str, b
         sig: String::new(),
     };
     e.sign(key);
+    if !store(&mut entries, &e, mirror, names)? {
+        bail!("the entry was not saved: a newer version exists");
+    }
     Ok(e)
 }
 
-/// Stores an entry if it is newer than what this machine has. Returns whether it was.
-/// `mirror` is an Obsidian vault folder to copy readable entries into.
-pub fn apply(entry: &MemEntry, mirror: Option<&str>) -> Result<bool> {
+/// Stores an entry a peer sent if it is newer than what this machine has.
+/// Returns whether it was. `mirror` is an Obsidian vault folder.
+pub fn apply(entry: &MemEntry, mirror: Option<&str>, names: Names) -> Result<bool> {
+    let _guard = STORE.lock().unwrap();
+    let mut entries = load_strict(&entry.network)?;
+    let highest = entries.values().map(|e| e.clock).max().unwrap_or(0);
+    if entry.clock > highest.saturating_add(MAX_CLOCK_JUMP) {
+        bail!("entry {} has a clock far ahead of this machine's", entry.id);
+    }
+    store(&mut entries, entry, mirror, names)
+}
+
+fn store(entries: &mut BTreeMap<String, MemEntry>, entry: &MemEntry, mirror: Option<&str>, names: Names) -> Result<bool> {
     if !valid_id(&entry.id) || !IMPORTANCE.contains(&entry.importance.as_str()) {
         bail!("entry has an invalid id or importance");
     }
-    let mut entries = load(&entry.network);
-    let d = dir(&entry.network);
+    let d = dir(&entry.network)?;
     if let Some(old) = entries.get(&entry.id) {
         if !entry.newer_than(old) {
             return Ok(false);
@@ -149,50 +219,49 @@ pub fn apply(entry: &MemEntry, mirror: Option<&str>) -> Result<bool> {
         if !old.deleted {
             let h = d.join("history");
             std::fs::create_dir_all(&h)?;
-            std::fs::write(h.join(format!("{}.{}.md", old.id, old.clock)), old.render())?;
+            std::fs::write(h.join(format!("{}.{}.md", old.id, old.clock)), old.render(names))?;
         }
     }
     entries.insert(entry.id.clone(), entry.clone());
-    save(&entry.network, &entries)?;
-    write_files(&entry.network, &entries, entry, mirror)?;
+    save(&entry.network, entries)?;
+    write_files(&d, entries, entry, mirror, names)?;
     Ok(true)
 }
 
 /// Writes the readable file of one entry and the index of the network.
-fn write_files(network: &str, entries: &BTreeMap<String, MemEntry>, changed: &MemEntry, mirror: Option<&str>) -> Result<()> {
-    let d = dir(network);
+fn write_files(d: &Path, entries: &BTreeMap<String, MemEntry>, changed: &MemEntry, mirror: Option<&str>, names: Names) -> Result<()> {
     let archive = d.join("archive");
     std::fs::create_dir_all(&archive)?;
     let name = format!("{}.md", changed.id);
     let _ = std::fs::remove_file(d.join(&name));
     let _ = std::fs::remove_file(archive.join(&name));
-    let mirror_dir = mirror.map(|m| Path::new(m).join("agora").join(network));
+    let mirror_dir = mirror.map(|m| Path::new(m).join("agora").join(&changed.network));
     if let Some(m) = &mirror_dir {
         let _ = std::fs::remove_file(m.join(&name));
     }
     if !changed.deleted {
         // Low importance is kept but stays out of the index.
         let target = if changed.importance == "low" { archive.join(&name) } else { d.join(&name) };
-        std::fs::write(target, changed.render())?;
+        std::fs::write(target, changed.render(names))?;
         if let (Some(m), true) = (&mirror_dir, changed.importance != "low") {
             std::fs::create_dir_all(m)?;
-            std::fs::write(m.join(&name), changed.render())?;
+            std::fs::write(m.join(&name), changed.render(names))?;
         }
     }
     let mut index = String::from("# Shared memory\n\n");
     for e in entries.values().filter(|e| !e.deleted && e.importance != "low") {
-        index.push_str(&format!("- [{}]({}.md) — {}, {}\n", e.title.replace('\n', " "), e.id, e.importance, e.author_name));
+        index.push_str(&format!("- [{}]({}.md) — {}, {}\n", e.title.replace('\n', " "), e.id, e.importance, names(&e.author).replace('\n', " ")));
     }
     std::fs::write(d.join("INDEX.md"), index)?;
     Ok(())
 }
 
 /// The index of a network as text for `agora memory`.
-pub fn list(network: &str) -> String {
+pub fn list(network: &str, names: Names) -> String {
     let entries = load(network);
     let mut out = String::new();
     for e in entries.values().filter(|e| !e.deleted) {
-        out.push_str(&format!("{:<32} {:<7} {:<14} {}\n", e.id, e.importance, e.author_name, e.title.replace('\n', " ")));
+        out.push_str(&format!("{:<32} {:<7} {:<14} {}\n", e.id, e.importance, names(&e.author), e.title.replace('\n', " ")));
     }
     if out.is_empty() { "no entries\n".to_string() } else { out }
 }
@@ -213,7 +282,7 @@ mod tests {
 
     fn entry(clock: u64) -> MemEntry {
         let mut e = MemEntry {
-            network: "n".into(),
+            network: "0a1b2c".into(),
             id: "deploy".into(),
             clock,
             author: key().public().to_string(),
@@ -241,6 +310,17 @@ mod tests {
     }
 
     #[test]
+    fn text_cannot_move_between_signed_fields() {
+        let mut a = entry(1);
+        a.title = "a|b".into();
+        a.body = "c".into();
+        let mut b = entry(1);
+        b.title = "a".into();
+        b.body = "b|c".into();
+        assert_ne!(a.digest(), b.digest());
+    }
+
+    #[test]
     fn the_higher_clock_wins_and_ties_go_to_the_higher_author() {
         assert!(entry(2).newer_than(&entry(1)));
         assert!(!entry(1).newer_than(&entry(1)));
@@ -252,9 +332,19 @@ mod tests {
     #[test]
     fn slugs_are_safe_file_names() {
         assert_eq!(slug("Deploy: use ./run.sh (prod)!"), "deploy-use-run-sh-prod");
-        assert_eq!(slug("  ÄÖÜ  "), "note");
+        assert!(slug("  ÄÖÜ  ").starts_with("note-"));
+        assert_ne!(slug("ÄÖÜ"), slug("日本語"));
         assert!(valid_id(&slug("Room 12ab: Plan the migration")));
+        assert!(valid_id(&slug("日本語")));
         assert!(!valid_id("../etc/passwd"));
+    }
+
+    #[test]
+    fn a_network_id_that_is_not_hex_never_becomes_a_path() {
+        assert!(dir("0a1b2c3d4e5f").is_ok());
+        for bad in ["../../.claude", "/etc", "a/b", "", "x y", "..", "0a1b2c3d4e5f0a1b2c3d4e5f0a1b2c3d4e5f"] {
+            assert!(dir(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

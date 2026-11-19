@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use iroh::endpoint::{RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointId, SecretKey};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
 
@@ -16,7 +16,7 @@ use crate::memory::{self, MemEntry};
 use crate::project;
 use crate::proto::{self, ALPN, Capacity, Member, Msg, Ticket};
 use crate::room::{self, Invite, RoomEvent, RoomHandle, RoomState};
-use crate::state::{NetStatus, Network, State, home};
+use crate::state::{NetStatus, Network, State, home, write_private};
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const DEAD_AFTER: Duration = Duration::from_secs(45);
@@ -54,7 +54,8 @@ pub struct Response {
 struct PendingJoin {
     id: String,
     network: String,
-    tx: mpsc::Sender<Msg>,
+    tx: mpsc::UnboundedSender<Msg>,
+    conn: iroh::endpoint::Connection,
 }
 
 pub struct Shared {
@@ -62,7 +63,7 @@ pub struct Shared {
     endpoint: Endpoint,
     pub state: Mutex<State>,
     /// Approved peers we currently hold a live link to.
-    conns: Mutex<HashMap<String, mpsc::Sender<Msg>>>,
+    conns: Mutex<HashMap<String, mpsc::UnboundedSender<Msg>>>,
     /// Rooms running on this machine.
     rooms: Mutex<HashMap<String, RoomHandle>>,
     /// Last known capacity per peer id, our own included.
@@ -81,6 +82,8 @@ pub struct Shared {
     pending: Mutex<HashMap<String, PendingJoin>>,
     dialing: Mutex<HashSet<String>>,
     redial: Notify,
+    /// Set by `agora stop`.
+    shutdown: Notify,
 }
 
 impl Shared {
@@ -89,7 +92,7 @@ impl Shared {
         let changed = self.capacity.lock().unwrap().insert(self.me.clone(), capacity) != Some(capacity);
         if changed {
             for tx in self.conns.lock().unwrap().values() {
-                let _ = tx.try_send(Msg::Status { capacity });
+                let _ = tx.send(Msg::Status { capacity });
             }
         }
     }
@@ -98,7 +101,7 @@ impl Shared {
     pub fn announce_rooms(&self) {
         let rooms = self.rooms.lock().unwrap().len() as u32;
         for tx in self.conns.lock().unwrap().values() {
-            let _ = tx.try_send(Msg::Busy { rooms });
+            let _ = tx.send(Msg::Busy { rooms });
         }
     }
 
@@ -121,7 +124,7 @@ impl Shared {
     /// Queues a message for an approved, connected peer. False if it is offline.
     pub fn send_to(&self, peer: &str, msg: Msg) -> bool {
         match self.conns.lock().unwrap().get(peer) {
-            Some(tx) => tx.try_send(msg).is_ok(),
+            Some(tx) => tx.send(msg).is_ok(),
             None => false,
         }
     }
@@ -166,32 +169,37 @@ fn prune_rooms() {
     }
 }
 
-/// Stores a memory entry if it is new, announces high importance, and passes it on.
-fn accept_entry(shared: &Shared, entry: &MemEntry, from: Option<&str>) -> Result<bool> {
-    let (mirror, peers) = {
-        let state = shared.state.lock().unwrap();
-        let peers: Vec<String> = state.network(&entry.network).map(|n| n.peers.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
-        (state.obsidian.clone(), peers)
-    };
-    if !memory::apply(entry, mirror.as_deref())? {
-        return Ok(false);
-    }
+/// The names this machine knows the members of a network by, for showing who
+/// wrote an entry. What an author calls itself is not used.
+fn author_names(shared: &Shared, network: &str) -> HashMap<String, String> {
+    let state = shared.state.lock().unwrap();
+    let mut names: HashMap<String, String> = state.network(network).map(|n| n.peers.iter().map(|m| (m.id.clone(), m.name.clone())).collect()).unwrap_or_default();
+    names.insert(shared.me.clone(), state.name.clone());
+    names
+}
+
+fn name_in(names: &HashMap<String, String>, id: &str) -> String {
+    names.get(id).cloned().unwrap_or_else(|| format!("former member {}", short(id)))
+}
+
+/// Tells sessions about a high-importance entry and passes the entry on.
+fn announce_entry(shared: &Shared, entry: &MemEntry, from: Option<&str>, names: &HashMap<String, String>) {
     if entry.importance == "high" && !entry.deleted {
-        let line = format!("{} (by {}; read it with `agora memory show {}`)", entry.title, entry.author_name, entry.id);
+        let line = format!("{} (by {}; read it with `agora memory show {}`)", entry.title.replace('\n', " "), name_in(names, &entry.author), entry.id);
         shared.notices.lock().unwrap().push(line.clone());
         event("memory", &line);
     }
+    let peers: Vec<String> = shared.state.lock().unwrap().network(&entry.network).map(|n| n.peers.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
     for p in peers {
         if Some(p.as_str()) != from {
             shared.send_to(&p, Msg::MemPut { entry: entry.clone() });
         }
     }
-    Ok(true)
 }
 
-/// Checks an entry a peer sent before storing it.
+/// Checks an entry a peer sent, and stores it if it is newer than ours.
 fn receive_entry(shared: &Shared, peer: &str, entry: &MemEntry) -> Result<()> {
-    {
+    let mirror = {
         let state = shared.state.lock().unwrap();
         let net = state.network(&entry.network).filter(|n| n.status == NetStatus::Active).ok_or_else(|| anyhow!("unknown network"))?;
         if !net.peers.iter().any(|m| m.id == peer) {
@@ -200,9 +208,13 @@ fn receive_entry(shared: &Shared, peer: &str, entry: &MemEntry) -> Result<()> {
         if entry.author != shared.me && !net.peers.iter().any(|m| m.id == entry.author) {
             bail!("the author is not a member of that network");
         }
-    }
+        state.obsidian.clone()
+    };
     entry.verify()?;
-    accept_entry(shared, entry, Some(peer))?;
+    let names = author_names(shared, &entry.network);
+    if memory::apply(entry, mirror.as_deref(), &|id| name_in(&names, id))? {
+        announce_entry(shared, entry, Some(peer), &names);
+    }
     Ok(())
 }
 
@@ -215,22 +227,16 @@ fn sync_memory(shared: &Arc<Shared>, peer: &str) {
     let Some(tx) = shared.conns.lock().unwrap().get(peer).cloned() else { return };
     let networks: Vec<String> =
         shared.state.lock().unwrap().networks.iter().filter(|n| n.peers.iter().any(|m| m.id == peer)).map(|n| n.id.clone()).collect();
-    let rooms = shared.rooms.lock().unwrap().len() as u32;
-    let capacity = shared.capacity_of(&shared.me);
-    tokio::spawn(async move {
-        // What the peer shows for us in `agora peers`.
-        let _ = tx.send(Msg::Busy { rooms }).await;
-        if let Some(capacity) = capacity {
-            let _ = tx.send(Msg::Status { capacity }).await;
+    // What the peer shows for us in `agora peers`, then every entry we share.
+    let _ = tx.send(Msg::Busy { rooms: shared.rooms.lock().unwrap().len() as u32 });
+    if let Some(capacity) = shared.capacity_of(&shared.me) {
+        let _ = tx.send(Msg::Status { capacity });
+    }
+    for n in networks {
+        for entry in memory::load(&n).into_values() {
+            let _ = tx.send(Msg::MemPut { entry });
         }
-        for n in networks {
-            for entry in memory::load(&n).into_values() {
-                if tx.send(Msg::MemPut { entry }).await.is_err() {
-                    return;
-                }
-            }
-        }
-    });
+    }
 }
 
 /// The network a command means: the named one, or the only one this machine is in.
@@ -248,16 +254,18 @@ fn pick_network(shared: &Shared, wanted: Option<&String>) -> Result<String> {
 }
 
 /// Writes an entry from this machine: block list, signature, storage, replication.
-fn remember(shared: &Shared, network: &str, title: &str, body: &str, importance: &str, deleted: bool) -> Result<MemEntry> {
-    let (name, blocked) = {
+/// `id` names an existing entry; without it the id comes from the title.
+fn remember(shared: &Shared, network: &str, id: Option<&str>, title: &str, body: &str, importance: &str, deleted: bool) -> Result<MemEntry> {
+    let (name, blocked, mirror) = {
         let state = shared.state.lock().unwrap();
-        (state.name.clone(), memory::blocked(&state.blocklist, &format!("{title}\n{body}")).map(str::to_string))
+        (state.name.clone(), memory::blocked(&state.blocklist, &format!("{title}\n{body}")).map(str::to_string), state.obsidian.clone())
     };
     if let Some(term) = blocked {
         bail!("not saved: the text contains \"{term}\", which is on this machine's block list");
     }
-    let entry = memory::compose(network, &shared.secret, &name, title, body, importance, deleted)?;
-    accept_entry(shared, &entry, None)?;
+    let names = author_names(shared, network);
+    let entry = memory::write_local(network, &shared.secret, &name, id, title, body, importance, deleted, mirror.as_deref(), &|a| name_in(&names, a))?;
+    announce_entry(shared, &entry, None, &names);
     Ok(entry)
 }
 
@@ -298,6 +306,7 @@ pub async fn run() -> Result<()> {
         pending: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
         redial: Notify::new(),
+        shutdown: Notify::new(),
     });
     eprintln!("agora daemon running, peer id {}", shared.me);
     prune_rooms();
@@ -318,21 +327,15 @@ pub async fn run() -> Result<()> {
                 });
             }
             _ = tokio::signal::ctrl_c() => break,
+            _ = shared.shutdown.notified() => {
+                // Let the answer to `agora stop` go out first.
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                break;
+            }
         }
     }
     let _ = std::fs::remove_file(DaemonInfo::path());
     endpoint.close().await;
-    Ok(())
-}
-
-fn write_private(path: &std::path::Path, content: &str) -> Result<()> {
-    std::fs::create_dir_all(home())?;
-    std::fs::write(path, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
     Ok(())
 }
 
@@ -352,17 +355,18 @@ async fn accept_loop(shared: Arc<Shared>) {
 async fn handle_incoming(shared: Arc<Shared>, incoming: iroh::endpoint::Incoming) -> Result<()> {
     let conn = incoming.await.map_err(|e| anyhow!("{e}"))?;
     let peer = conn.remote_id().to_string();
-    shared.links.lock().unwrap().insert(peer.clone(), conn.clone());
     let (mut send, mut recv) = conn.accept_bi().await.map_err(|e| anyhow!("{e}"))?;
 
-    let Msg::Hello { peer_name, network, proof } = proto::read_msg(&mut recv).await? else {
-        bail!("peer {peer} did not start with PEER_HELLO");
+    // A peer that connects and then says nothing does not get to hold the connection open.
+    let hello = tokio::time::timeout(Duration::from_secs(20), proto::read_msg(&mut recv)).await.map_err(|_| anyhow!("peer {} sent no PEER_HELLO", short(&peer)))??;
+    let Msg::Hello { peer_name, network, proof } = hello else {
+        bail!("peer {} did not start with PEER_HELLO", short(&peer));
     };
 
     // Decide under the lock, answer after releasing it.
     enum Decision {
         Reject(&'static str),
-        Member(Vec<Member>),
+        Member(Vec<Member>, u64),
         Pending,
     }
     let decision = {
@@ -371,12 +375,12 @@ async fn handle_incoming(shared: Arc<Shared>, incoming: iroh::endpoint::Incoming
             None => Decision::Reject("unknown network"),
             Some(net) if net.status != NetStatus::Active => Decision::Reject("this peer is not a member yet"),
             Some(net) if proto::proof(&net.secret, &peer) != proof => Decision::Reject("wrong network secret"),
-            Some(net) if net.peers.iter().any(|m| m.id == peer) => Decision::Member(all_members(&shared.me, &state, net)),
+            Some(net) if net.peers.iter().any(|m| m.id == peer) => Decision::Member(all_members(&shared.me, &state.name, net), net.version),
             Some(_) => Decision::Pending,
         }
     };
 
-    let (tx, rx) = mpsc::channel(256);
+    let (tx, rx) = mpsc::unbounded_channel();
     match decision {
         Decision::Reject(reason) => {
             proto::write_msg(&mut send, &Msg::Reject { reason: reason.into() }).await?;
@@ -385,26 +389,33 @@ async fn handle_incoming(shared: Arc<Shared>, incoming: iroh::endpoint::Incoming
             let _ = tokio::time::timeout(Duration::from_secs(3), conn.closed()).await;
             return Ok(());
         }
-        Decision::Member(members) => {
+        Decision::Member(members, version) => {
             let my_name = shared.state.lock().unwrap().name.clone();
-            proto::write_msg(&mut send, &Msg::Approve { peer_name: my_name, members }).await?;
+            proto::write_msg(&mut send, &Msg::Approve { peer_name: my_name, members, version }).await?;
             shared.conns.lock().unwrap().insert(peer.clone(), tx.clone());
+            shared.links.lock().unwrap().insert(peer.clone(), conn.clone());
             sync_memory(&shared, &peer);
         }
         Decision::Pending => {
-            let mut nick = peer_name.clone();
-            {
+            // The name is the peer's own claim: keep only what is safe to show and to type.
+            let mut nick = proto::clean_name(&peer_name);
+            let asked_before = {
                 let state = shared.state.lock().unwrap();
                 let mut pending = shared.pending.lock().unwrap();
+                let asked_before = pending.values().any(|p| p.id == peer);
                 pending.retain(|_, p| p.id != peer);
                 let taken = pending.contains_key(&nick) || state.networks.iter().any(|n| n.peers.iter().any(|m| m.name == nick));
                 if taken {
                     nick = format!("{nick}-{}", &peer[..6.min(peer.len())]);
                 }
-                pending.insert(nick.clone(), PendingJoin { id: peer.clone(), network: network.clone(), tx: tx.clone() });
+                pending.insert(nick.clone(), PendingJoin { id: peer.clone(), network: network.clone(), tx: tx.clone(), conn: conn.clone() });
+                asked_before
+            };
+            // One event per peer, however often it reconnects while it waits.
+            if !asked_before {
+                eprintln!("join request from \"{nick}\" ({}), words: {}", short(&peer), proto::words(&shared.me, &peer));
+                event("join-request", &format!("\"{nick}\" wants to join; words: {} (agora approve {nick})", proto::words(&shared.me, &peer)));
             }
-            eprintln!("join request from \"{nick}\" ({}), words: {}", short(&peer), proto::words(&shared.me, &peer));
-            event("join-request", &format!("\"{nick}\" wants to join; words: {} (agora approve {nick})", proto::words(&shared.me, &peer)));
             proto::write_msg(&mut send, &Msg::Pending).await?;
         }
     }
@@ -466,23 +477,26 @@ async fn dial(shared: &Arc<Shared>, peer: &str, network: &str) -> Result<()> {
         (state.name.clone(), net.secret.clone())
     };
     let conn = shared.endpoint.connect(id, ALPN).await.map_err(|e| anyhow!("{e}"))?;
-    shared.links.lock().unwrap().insert(peer.to_string(), conn.clone());
     let (mut send, recv) = conn.open_bi().await.map_err(|e| anyhow!("{e}"))?;
     let hello = Msg::Hello { peer_name: name, network: network.into(), proof: proto::proof(&secret, &shared.me) };
     proto::write_msg(&mut send, &hello).await?;
+    shared.links.lock().unwrap().insert(peer.to_string(), conn.clone());
 
-    let (tx, rx) = mpsc::channel(256);
+    let (tx, rx) = mpsc::unbounded_channel();
     let result = run_link(shared, peer, network, &tx, rx, send, recv).await;
     cleanup_link(shared, peer, &tx);
     conn.close(0u32.into(), b"bye");
     result
 }
 
-fn cleanup_link(shared: &Shared, peer: &str, tx: &mpsc::Sender<Msg>) {
+fn cleanup_link(shared: &Shared, peer: &str, tx: &mpsc::UnboundedSender<Msg>) {
     let mut conns = shared.conns.lock().unwrap();
     if conns.get(peer).is_some_and(|t| t.same_channel(tx)) {
         conns.remove(peer);
+    }
+    if !conns.contains_key(peer) {
         shared.links.lock().unwrap().remove(peer);
+        shared.activity.lock().unwrap().remove(peer);
     }
     shared.pending.lock().unwrap().retain(|_, p| !p.tx.same_channel(tx));
 }
@@ -492,8 +506,8 @@ async fn run_link(
     shared: &Arc<Shared>,
     peer: &str,
     network: &str,
-    tx: &mpsc::Sender<Msg>,
-    mut rx: mpsc::Receiver<Msg>,
+    tx: &mpsc::UnboundedSender<Msg>,
+    mut rx: mpsc::UnboundedReceiver<Msg>,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
@@ -522,32 +536,42 @@ async fn run_link(
 }
 
 /// Applies one message from a peer. Returns false when the link should end.
-fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>, msg: Msg) -> Result<bool> {
+fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::UnboundedSender<Msg>, msg: Msg) -> Result<bool> {
     match msg.clone() {
         Msg::Heartbeat | Msg::Pending | Msg::Hello { .. } => Ok(true),
-        Msg::Approve { members, .. } => {
+        Msg::Approve { members, version, .. } => {
             // Only the peer we asked may admit us, and only into the network we asked for.
-            set_members(shared, peer, network, members, true)?;
+            let ours = set_members(shared, peer, network, members, version, true)?;
             shared.conns.lock().unwrap().insert(peer.to_string(), tx.clone());
             shared.redial.notify_one();
+            // Our list is newer than the one of the peer that took the link: give it ours.
+            if let Some(newer) = ours {
+                let _ = tx.send(newer);
+            }
             sync_memory(shared, peer);
             Ok(true)
         }
-        Msg::Members { network: n, members } => {
-            if n != network {
+        Msg::Members { network: n, members, version } => {
+            // Only an approved member of this network may send its member list.
+            if n != network || !is_live_member(shared, peer, tx) || !member_of(shared, network, peer) {
                 return Ok(true);
             }
-            let still_member = members.iter().any(|m| m.id == shared.me);
-            if still_member {
-                set_members(shared, peer, network, members, false)?;
+            if members.iter().any(|m| m.id == shared.me) {
+                if let Some(newer) = set_members(shared, peer, network, members, version, false)? {
+                    let _ = tx.send(newer);
+                }
                 shared.redial.notify_one();
-            } else {
-                let mut state = shared.state.lock().unwrap();
-                state.networks.retain(|x| x.id != network);
-                state.save()?;
-                eprintln!("removed from network {network} by {}", short(peer));
+                return Ok(true);
             }
-            Ok(still_member)
+            // A newer list without us: we were revoked.
+            let mut state = shared.state.lock().unwrap();
+            if !state.network(network).is_some_and(|x| version > x.version) {
+                return Ok(true);
+            }
+            state.networks.retain(|x| x.id != network);
+            state.save()?;
+            eprintln!("removed from network {network} by {}", short(peer));
+            Ok(false)
         }
         Msg::MemPut { entry } => {
             if is_live_member(shared, peer, tx) {
@@ -596,13 +620,24 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
                 // so that the other side does not wait for it.
                 if !known {
                     match msg {
-                        Msg::Resend { .. } => {
+                        Msg::Resend { .. } if room::valid_room_id(room_id) => {
+                            // Only a peer that took part in that room gets its result.
                             let dir = room::room_dir(room_id);
-                            let result = std::fs::read_to_string(dir.join("result.md")).unwrap_or_else(|_| "The room no longer exists on the opener's machine; its daemon may have restarted.".into());
+                            let took_part = std::fs::read_to_string(dir.join("members")).is_ok_and(|m| m.lines().any(|l| l == peer));
+                            let result = took_part.then(|| std::fs::read_to_string(dir.join("result.md")).ok()).flatten();
+                            let result = result.unwrap_or_else(|| "The room no longer exists on the opener's machine; its daemon may have restarted.".into());
                             shared.send_to(peer, Msg::RoomClose { room_id: room_id.clone(), reason: "closed".into(), result });
                         }
-                        Msg::RoomPing { .. } => {
+                        Msg::RoomPing { .. } if room::valid_room_id(room_id) => {
                             shared.send_to(peer, Msg::RoomDecline { room_id: room_id.clone(), reason: "its daemon restarted and lost the room".into() });
+                        }
+                        // The opener closed a room we were invited to and never joined.
+                        Msg::RoomClose { .. } => {
+                            shared.invites.lock().unwrap().retain(|id, i| !(id == room_id && i.from == peer));
+                        }
+                        // Someone joins or speaks in a room that is gone here: tell it, so it does not wait.
+                        Msg::RoomJoin { .. } | Msg::Say { .. } if room::valid_room_id(room_id) => {
+                            shared.send_to(peer, Msg::RoomClose { room_id: room_id.clone(), reason: "closed".into(), result: "The room is closed.".into() });
                         }
                         _ => {}
                     }
@@ -625,7 +660,7 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
 
 /// True if this link belongs to an approved peer. Room messages on a link that
 /// still waits for approval are ignored.
-fn is_live_member(shared: &Shared, peer: &str, tx: &mpsc::Sender<Msg>) -> bool {
+fn is_live_member(shared: &Shared, peer: &str, tx: &mpsc::UnboundedSender<Msg>) -> bool {
     shared.conns.lock().unwrap().get(peer).is_some_and(|t| t.same_channel(tx))
 }
 
@@ -639,7 +674,7 @@ fn member(shared: &Shared, id: &str) -> Option<Member> {
 fn on_invite(shared: &Arc<Shared>, peer: &str, mut invite: Invite) {
     let Some(m) = member(shared, peer) else { return };
     let room_id = invite.room_id.clone();
-    if !room_id.chars().all(|c| c.is_ascii_alphanumeric()) || room_id.is_empty() || room_id.len() > 32 {
+    if !room::valid_room_id(&room_id) {
         return;
     }
     // The opener asks again when it has not heard from us: answer, do not join twice.
@@ -648,6 +683,11 @@ fn on_invite(shared: &Arc<Shared>, peer: &str, mut invite: Invite) {
         return;
     }
     if shared.invites.lock().unwrap().contains_key(&room_id) {
+        return;
+    }
+    // A room id that was used here before would overwrite that room's log and result.
+    if room::room_dir(&room_id).exists() {
+        shared.send_to(peer, Msg::RoomDecline { room_id, reason: "this room id was used before".into() });
         return;
     }
     invite.rights = m.rights.clone();
@@ -664,27 +704,38 @@ fn on_invite(shared: &Arc<Shared>, peer: &str, mut invite: Invite) {
 }
 
 fn start_joiner(shared: &Arc<Shared>, invite: Invite) {
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::channel(1024);
+    let (cancel, cancelled) = watch::channel(false);
     let id = invite.room_id.clone();
-    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: invite.topic.clone(), role: "joined", tx, state: None });
+    let handle = RoomHandle { topic: invite.topic.clone(), role: "joined", tx, state: None, cancel, from: Some(invite.from.clone()) };
+    shared.rooms.lock().unwrap().insert(id.clone(), handle);
     eprintln!("joining room {id}: {}", invite.topic.lines().next().unwrap_or(""));
     shared.announce_rooms();
     let shared = shared.clone();
     tokio::spawn(async move {
-        if let Err(e) = room::run_joiner(shared.clone(), invite, rx).await {
-            eprintln!("room {id} ended: {e}");
+        // In a task of its own, so that the room is removed even if it panics.
+        match tokio::spawn(room::run_joiner(shared.clone(), invite, rx, cancelled)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("room {id} ended: {e}"),
+            Err(e) => eprintln!("room {id} crashed: {e}"),
         }
         shared.rooms.lock().unwrap().remove(&id);
         shared.announce_rooms();
     });
 }
 
-/// Replaces our member list for a network with the one a peer sent.
+fn member_of(shared: &Shared, network: &str, peer: &str) -> bool {
+    shared.state.lock().unwrap().network(network).is_some_and(|n| n.peers.iter().any(|m| m.id == peer))
+}
+
+/// Takes over the member list a peer sent if it is newer than ours.
 /// `admit` is true for PEER_APPROVE, which may turn a joining network active.
-fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>, admit: bool) -> Result<()> {
+/// Returns our own list as a message if ours is the newer one.
+fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>, version: u64, admit: bool) -> Result<Option<Msg>> {
     let mut state = shared.state.lock().unwrap();
     let me = shared.me.clone();
-    let Some(net) = state.network_mut(network) else { return Ok(()) };
+    let my_name = state.name.clone();
+    let Some(net) = state.network_mut(network) else { return Ok(None) };
     let trusted = match net.status {
         NetStatus::Joining => admit && net.opener == from,
         NetStatus::Active => net.peers.iter().any(|m| m.id == from),
@@ -692,25 +743,44 @@ fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>,
     if !trusted || !members.iter().any(|m| m.id == from) {
         bail!("ignoring member list from {} (not entitled)", short(from));
     }
+    // A peer that was away may hold an older list. Ours stays, and it gets ours.
+    if net.status == NetStatus::Active && version <= net.version {
+        let ours = (version < net.version).then(|| Msg::Members { network: network.into(), members: all_members(&me, &my_name, net), version: net.version });
+        return Ok(ours);
+    }
     // Level and rights are local policy: keep what this machine decided for peers
     // it already knows, and start new ones at the defaults.
     let known: HashMap<String, (u8, String)> = net.peers.iter().map(|m| (m.id.clone(), (m.level, m.rights.clone()))).collect();
+    let before: Vec<String> = net.peers.iter().map(|m| m.id.clone()).collect();
     net.peers = members
         .into_iter()
         .filter(|m| m.id != me)
         .map(|mut m| {
             let (level, rights) = known.get(&m.id).cloned().unwrap_or((1, "full".into()));
+            m.name = proto::clean_name(&m.name);
             m.level = level;
             m.rights = rights;
             m
         })
         .collect();
     net.status = NetStatus::Active;
-    state.save()
+    net.version = version;
+    let gone: Vec<String> = before.into_iter().filter(|id| !net.peers.iter().any(|m| m.id == *id)).collect();
+    let list = Msg::Members { network: network.into(), members: all_members(&me, &my_name, net), version };
+    state.save()?;
+    drop(state);
+    // Peers that are no longer members: tell them, and end their links.
+    let mut conns = shared.conns.lock().unwrap();
+    for id in gone {
+        if let Some(tx) = conns.remove(&id) {
+            let _ = tx.send(list.clone());
+        }
+    }
+    Ok(None)
 }
 
-fn all_members(me: &str, state: &State, net: &Network) -> Vec<Member> {
-    let mut v = vec![Member { name: state.name.clone(), id: me.to_string(), level: 1, rights: "full".into() }];
+fn all_members(me: &str, my_name: &str, net: &Network) -> Vec<Member> {
+    let mut v = vec![Member { name: my_name.to_string(), id: me.to_string(), level: 1, rights: "full".into() }];
     v.extend(net.peers.iter().cloned());
     v
 }
@@ -723,11 +793,11 @@ fn short(id: &str) -> &str {
 fn broadcast_members(shared: &Shared, network: &str) {
     let state = shared.state.lock().unwrap();
     let Some(net) = state.network(network) else { return };
-    let msg = Msg::Members { network: network.into(), members: all_members(&shared.me, &state, net) };
+    let msg = Msg::Members { network: network.into(), members: all_members(&shared.me, &state.name, net), version: net.version };
     let conns = shared.conns.lock().unwrap();
     for m in &net.peers {
         if let Some(tx) = conns.get(&m.id) {
-            let _ = tx.try_send(msg.clone());
+            let _ = tx.send(msg.clone());
         }
     }
 }
@@ -737,7 +807,8 @@ fn broadcast_members(shared: &Shared, network: &str) {
 async fn serve_control(shared: Arc<Shared>, stream: tokio::net::TcpStream, token: &str) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
-    BufReader::new(read).read_line(&mut line).await?;
+    // A request is one line; nothing legitimate is larger than a diff for review.
+    BufReader::new(read.take(4 << 20)).read_line(&mut line).await?;
     let req: Request = serde_json::from_str(&line).context("malformed control request")?;
     let resp = if req.token != token {
         Response { ok: false, text: "wrong control token".into() }
@@ -764,6 +835,10 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let arg = |k: &str| req.args.get(k).cloned().ok_or_else(|| anyhow!("missing argument: {k}"));
     match req.cmd.as_str() {
         "status" => Ok(status(shared)),
+        "shutdown" => {
+            shared.shutdown.notify_one();
+            Ok("stopping".into())
+        }
         "peers" => Ok(peers(shared)),
         "open" => {
             let mut state = shared.state.lock().unwrap();
@@ -773,6 +848,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 status: NetStatus::Active,
                 opener: shared.me.clone(),
                 peers: vec![],
+                version: 0,
             };
             let ticket = Ticket { network: net.id.clone(), secret: net.secret.clone(), opener: shared.me.clone() }.encode();
             let id = net.id.clone();
@@ -782,6 +858,12 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         }
         "join" => {
             let t = Ticket::decode(&arg("ticket")?)?;
+            // Everything in a network ID comes from someone else. The network's id
+            // becomes a directory name, so it must be plain hex.
+            let secret_ok = !t.secret.is_empty() && t.secret.len() <= 128 && t.secret.chars().all(|c| c.is_ascii_hexdigit());
+            if !proto::valid_network_id(&t.network) || !secret_ok || t.opener.parse::<EndpointId>().is_err() {
+                bail!("this network ID is not valid");
+            }
             if t.opener == shared.me {
                 bail!("this is your own network");
             }
@@ -790,7 +872,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 bail!("already a member of, or joining, network {}", t.network);
             }
             let words = proto::words(&shared.me, &t.opener);
-            state.networks.push(Network { id: t.network.clone(), secret: t.secret, status: NetStatus::Joining, opener: t.opener, peers: vec![] });
+            state.networks.push(Network { id: t.network.clone(), secret: t.secret, status: NetStatus::Joining, opener: t.opener, peers: vec![], version: 0 });
             state.save()?;
             shared.redial.notify_one();
             Ok(format!("{WARNING}\n\nJoin request for network {} sent. Compare these four words with the other screen\nbefore the request is approved there:\n\n  {words}", t.network))
@@ -803,17 +885,20 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 bail!("level must be 1, 2 or 3 and rights one of full, read, talk");
             }
             let p = shared.pending.lock().unwrap().remove(&name).ok_or_else(|| anyhow!("no join request from \"{name}\" (see `agora status`)"))?;
-            let members = {
+            let (members, version, my_name) = {
                 let mut state = shared.state.lock().unwrap();
+                let my_name = state.name.clone();
                 let net = state.network_mut(&p.network).ok_or_else(|| anyhow!("network is gone"))?;
                 net.peers.retain(|m| m.id != p.id);
                 net.peers.push(Member { name: name.clone(), id: p.id.clone(), level, rights: rights.clone() });
+                net.version += 1;
+                let out = (all_members(&shared.me, &my_name, net), net.version, my_name);
                 state.save()?;
-                all_members(&shared.me, &state, state.network(&p.network).unwrap())
+                out
             };
             shared.conns.lock().unwrap().insert(p.id.clone(), p.tx.clone());
-            let my_name = shared.state.lock().unwrap().name.clone();
-            p.tx.try_send(Msg::Approve { peer_name: my_name, members }).map_err(|_| anyhow!("the peer disconnected; it will ask again"))?;
+            shared.links.lock().unwrap().insert(p.id.clone(), p.conn.clone());
+            p.tx.send(Msg::Approve { peer_name: my_name, members, version }).map_err(|_| anyhow!("the peer disconnected; it will ask again"))?;
             broadcast_members(shared, &p.network);
             sync_memory(shared, &p.id);
             Ok(format!("Approved \"{name}\" (level {level}, rights {rights}). Words were: {}", proto::words(&shared.me, &p.id)))
@@ -821,43 +906,61 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         "reject" => {
             let name = arg("name")?;
             let p = shared.pending.lock().unwrap().remove(&name).ok_or_else(|| anyhow!("no join request from \"{name}\""))?;
-            let _ = p.tx.try_send(Msg::Reject { reason: "rejected by the user".into() });
+            let _ = p.tx.send(Msg::Reject { reason: "rejected by the user".into() });
             Ok(format!("Rejected \"{name}\"."))
         }
         "revoke" => {
             let name = arg("name")?;
-            let (network, id, rest) = {
+            let (network, id, rest, version) = {
                 let mut state = shared.state.lock().unwrap();
-                let me_member = Member { name: state.name.clone(), id: shared.me.clone(), level: 1, rights: "full".into() };
+                let my_name = state.name.clone();
                 let net = state.networks.iter_mut().find(|n| n.peers.iter().any(|m| m.name == name)).ok_or_else(|| anyhow!("no peer named \"{name}\""))?;
                 let id = net.peers.iter().find(|m| m.name == name).unwrap().id.clone();
                 net.peers.retain(|m| m.id != id);
-                let mut rest = vec![me_member];
-                rest.extend(net.peers.iter().cloned());
-                let network = net.id.clone();
+                net.version += 1;
+                let out = (net.id.clone(), id, all_members(&shared.me, &my_name, net), net.version);
                 state.save()?;
-                (network, id, rest)
+                out
             };
             // Tell the revoked peer (its list no longer contains it), then drop the link.
             if let Some(tx) = shared.conns.lock().unwrap().remove(&id) {
-                let _ = tx.try_send(Msg::Members { network: network.clone(), members: rest });
+                let _ = tx.send(Msg::Members { network: network.clone(), members: rest, version });
             }
             broadcast_members(shared, &network);
+            // Rooms that peer opened stop here at once; rooms opened here go on without it.
+            for (room_id, room) in shared.rooms.lock().unwrap().iter() {
+                if room.from.as_deref() == Some(id.as_str()) {
+                    let _ = room.cancel.send(true);
+                    let _ = room.tx.try_send(RoomEvent::Panic);
+                } else {
+                    let left = Msg::RoomDecline { room_id: room_id.clone(), reason: "it was revoked".into() };
+                    let _ = room.tx.try_send(RoomEvent::Remote(id.clone(), left));
+                }
+            }
             Ok(format!("Revoked \"{name}\". It has to be approved again to rejoin."))
         }
         "trust" => {
+            // Only what is given changes; the other setting keeps its value.
             let name = arg("name")?;
-            let level: u8 = arg("level")?.parse().map_err(|_| anyhow!("level must be 1, 2 or 3"))?;
-            let rights = arg("rights")?;
-            if !(1..=3).contains(&level) || !["full", "read", "talk"].contains(&rights.as_str()) {
-                bail!("level must be 1, 2 or 3 and rights one of full, read, talk");
+            let level = match req.args.get("level").filter(|l| !l.is_empty()) {
+                Some(l) => Some(l.parse::<u8>().ok().filter(|l| (1..=3).contains(l)).ok_or_else(|| anyhow!("level must be 1, 2 or 3"))?),
+                None => None,
+            };
+            let rights = req.args.get("rights").filter(|r| !r.is_empty()).cloned();
+            if rights.as_ref().is_some_and(|r| !["full", "read", "talk"].contains(&r.as_str())) {
+                bail!("rights must be one of full, read, talk");
             }
             let mut state = shared.state.lock().unwrap();
             let m = state.networks.iter_mut().flat_map(|n| n.peers.iter_mut()).find(|m| m.name == name).ok_or_else(|| anyhow!("no peer named \"{name}\""))?;
-            m.level = level;
-            m.rights = rights.clone();
+            if let Some(level) = level {
+                m.level = level;
+            }
+            if let Some(rights) = rights {
+                m.rights = rights;
+            }
+            let text = format!("\"{name}\" has level {} and rights {} on this machine.", m.level, m.rights);
             state.save()?;
-            Ok(format!("\"{name}\" now has level {level} and rights {rights} on this machine."))
+            Ok(text)
         }
         "remember" => {
             let text = arg("text")?;
@@ -867,7 +970,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 None => text.lines().next().unwrap_or("").chars().take(60).collect(),
             };
             let importance = req.args.get("importance").cloned().unwrap_or_else(|| "normal".into());
-            let e = remember(shared, &network, &title, &text, &importance, false)?;
+            let e = remember(shared, &network, None, &title, &text, &importance, false)?;
             Ok(format!("Saved \"{}\" as {} ({}) in network {network}.", e.title, e.id, e.importance))
         }
         "memory" => {
@@ -880,15 +983,23 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 if networks.is_empty() {
                     bail!("this machine is in no network yet");
                 }
-                return Ok(networks.iter().map(|n| format!("network {n}  ({})\n{}", memory::dir(n).display(), memory::list(n))).collect::<Vec<_>>().join("\n"));
+                return Ok(networks
+                    .iter()
+                    .map(|n| {
+                        let names = author_names(shared, n);
+                        let dir = memory::dir(n).map(|d| d.display().to_string()).unwrap_or_default();
+                        format!("network {n}  ({dir})\n{}", memory::list(n, &|id| name_in(&names, id)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"));
             }
             let id = arg("id")?;
             let found = networks.iter().find_map(|n| memory::load(n).remove(&id).filter(|e| !e.deleted));
             let e = found.ok_or_else(|| anyhow!("no entry {id} (see `agora memory`)"))?;
             match action.as_str() {
-                "show" => Ok(format!("{} ({}, by {})\n\n{}", e.title, e.importance, e.author_name, e.body)),
+                "show" => Ok(format!("{} ({}, by {})\n\n{}", e.title, e.importance, name_in(&author_names(shared, &e.network), &e.author), e.body)),
                 "forget" => {
-                    remember(shared, &e.network, &e.title, "", &e.importance, true)?;
+                    remember(shared, &e.network, Some(&e.id), &e.title, "", &e.importance, true)?;
                     Ok(format!("Forgot {id} on all peers."))
                 }
                 other => bail!("unknown memory action: {other}"),
@@ -1004,6 +1115,8 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         "panic" => {
             let rooms = shared.rooms.lock().unwrap();
             for room in rooms.values() {
+                // The signal stops a turn that is running; the event stops a room that is waiting.
+                let _ = room.cancel.send(true);
                 let _ = room.tx.try_send(RoomEvent::Panic);
             }
             let n = rooms.len();
@@ -1037,9 +1150,10 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
             };
             let project = project_of(shared, req)?;
             let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
-            let (tx, rx) = mpsc::channel(64);
+            let (tx, rx) = mpsc::channel(1024);
             let role = if mode == "task" { "delegated" } else { "asking" };
-            shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: question.clone(), role, tx, state: None });
+            let (cancel, _) = watch::channel(false);
+            shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: question.clone(), role, tx, state: None, cancel, from: None });
             shared.announce_rooms();
             let result = room::run_ask(shared.clone(), id.clone(), question, peer, project, mode, rx).await;
             shared.rooms.lock().unwrap().remove(&id);
@@ -1061,7 +1175,7 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
         }
         "say" => {
             let id = arg("room")?;
-            let extra: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(0);
+            let extra: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(0).min(100);
             let (tx, state) = {
                 let rooms = shared.rooms.lock().unwrap();
                 let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
@@ -1111,7 +1225,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         bail!("turns must be between 1 and 30");
     }
     let lean = req.args.get("lean").is_some_and(|v| v == "1");
-    let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(1_000_000);
+    let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
     {
@@ -1130,6 +1244,9 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             joiners.push((*m).clone());
         }
     }
+    // A peer named twice, or met in two networks, takes part once.
+    let mut seen = HashSet::new();
+    joiners.retain(|m| seen.insert(m.id.clone()));
     if joiners.is_empty() {
         bail!("no peer is online to discuss with");
     }
@@ -1146,22 +1263,25 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     }
     let project = project_of(shared, req)?;
     let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
-    let (tx, rx) = mpsc::channel(64);
+    let (tx, rx) = mpsc::channel(1024);
     let (state_tx, state_rx) = watch::channel(RoomState::Running);
-    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: topic.clone(), role: "opened", tx, state: Some(state_rx.clone()) });
+    let (cancel, cancelled) = watch::channel(false);
+    shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: topic.clone(), role: "opened", tx, state: Some(state_rx.clone()), cancel, from: None });
     eprintln!("room {id} opened: {topic}");
     shared.announce_rooms();
     // The room outlives this request: it may pause for a human and go on later.
     let (sh, rid) = (shared.clone(), id.clone());
     let note_topic = topic.clone();
     tokio::spawn(async move {
-        let result = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, project, rx, state_tx.clone()).await;
+        // In a task of its own, so that the room is removed even if it panics.
+        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, project, rx, state_tx.clone(), cancelled);
+        let result = tokio::spawn(run).await.unwrap_or_else(|e| Err(anyhow!("the room crashed: {e}")));
         if let Ok(text) = &result {
             event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
             // The result goes into the shared memory so every peer keeps it.
             if remember_as != "none" {
                 let title = format!("Room {rid}: {}", note_topic.chars().take(60).collect::<String>());
-                if let Err(e) = remember(&sh, &network, &title, text, &remember_as, false) {
+                if let Err(e) = remember(&sh, &network, None, &title, text, &remember_as, false) {
                     eprintln!("room {rid}: result not saved to the shared memory: {e}");
                 }
             }

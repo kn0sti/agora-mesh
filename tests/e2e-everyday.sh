@@ -94,6 +94,33 @@ check "a second session with tools does the work on each side" '[ "$(grep -c . "
 ROOML="$(ls -t "$T/a/rooms" | head -1)"
 check "the working sessions are told the agreed plan" '[ "$(grep -c "got-the-plan" "$T/a/rooms/$ROOML/log.md")" = 2 ]'
 
+# A report that arrives while the opener is busy with its own package is not lost.
+unset FAKE_STUBBORN; a stop >/dev/null; b stop >/dev/null; c stop >/dev/null 2>&1; sleep 1
+export FAKE_SPLIT=2
+FAKE_DELAY=1.5 AGORA_HOME="$T/a" "$BIN" status >/dev/null     # the opener answers slowly,
+FAKE_DELAY=0.2 AGORA_HOME="$T/b" "$BIN" status >/dev/null     # the joiner quickly
+wait_for 40 'a status | grep -q "Heimserver *online"'
+(cd "$T/repoA" && a discuss "Three packages" --with Heimserver --turns 3 --remember none > "$T/three" 2>&1) &
+check "a room where the opener has two packages finishes" 'wait_for 90 "grep -q \"closed: work finished;\" \"$T/three\""'
+ROOM3P="$(ls -t "$T/a/rooms" | head -1)"
+check "all three packages are reported" '[ "$(grep -c "· DONE\]" "$T/a/rooms/$ROOM3P/log.md")" = 3 ]'
+a panic >/dev/null 2>&1; wait
+unset FAKE_SPLIT
+
+# `agora panic` stops a turn that is running, not only a room that is waiting.
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null
+FAKE_DELAY=120 AGORA_HOME="$T/b" "$BIN" status >/dev/null
+wait_for 40 'a status | grep -q "Heimserver *online"'
+(cd "$T" && a delegate "A long task" --with Heimserver --project none > "$T/stopped" 2>&1) &
+wait_for 15 'b rooms | grep -q "^room "'
+sleep 2
+t0=$(date +%s)
+b panic >/dev/null
+wait
+check "panic ends a turn in progress within seconds" '[ $(( $(date +%s) - t0 )) -lt 15 ] && grep -q "stopped by" "$T/stopped"'
+check "and the session process is gone" 'wait_for 5 "! pgrep -f \"sleep 120\" >/dev/null"'
+
 # A joiner's daemon restarts in the middle of a room
 unset FAKE_SPLIT; export FAKE_STUBBORN=1 FAKE_DELAY=0.4; restart
 a discuss "Lose the joiner" --with Heimserver --turns 20 --remember none > "$T/lost" 2>&1 &
@@ -115,7 +142,7 @@ check "the joiner lets go of the room once the opener is back without it" 'wait_
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in ask delegate review peers-during late lean lost lost2; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in ask delegate review peers-during late lean three stopped lost lost2; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- args a"; cat "$T/a/fake-args.log" 2>/dev/null
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"

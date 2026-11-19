@@ -47,6 +47,7 @@ check "agora wait returns the result of a closed room" 'a wait "$ROOM" | grep -q
 
 # 2. From level 2 on the invitation is accepted automatically; budgets end a stubborn discussion.
 b trust Mac --level 2 >/dev/null
+check "trust changes only what is given" 'b trust Mac --rights read | grep -q "level 2 and rights read" && b trust Mac --rights full | grep -q "level 2 and rights full"'
 export FAKE_STUBBORN=1; restart
 a discuss "Argue forever" --with Heimserver --turns 2 > "$T/out2" 2>&1
 check "auto-accepted at level 2 and stopped by the turn budget" 'grep -q "closed: turn budget used up" "$T/out2"'
@@ -57,6 +58,8 @@ check "the token budget stops the room" 'grep -q "closed: token budget used up" 
 check "it stops at the first turn over the budget (5 messages)" 'grep -q "; 5 messages;" "$T/out2b"'
 
 # 3. A human can speak in a running room, and `agora panic` stops it.
+# Slow answers, so that the room is still running when it is stopped.
+export FAKE_DELAY=0.3; restart
 a discuss "Stop me" --turns 30 > "$T/out3" 2>&1 &
 wait_for 10 'a rooms | grep -q "^room "'
 ROOM3="$(a rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p')"
@@ -67,7 +70,7 @@ check "panic stops the room" 'grep -q "stopped by" "$T/out3"'
 check "no rooms left on either side" 'wait_for 10 "a rooms | grep -q \"no rooms\" && b rooms | grep -q \"no rooms\""'
 
 # 4. NEED_HUMAN pauses the room; a human's answer from the other machine resumes it.
-unset FAKE_STUBBORN; export FAKE_ASK=1; restart
+unset FAKE_STUBBORN FAKE_DELAY; export FAKE_ASK=1; restart
 a discuss "Pick a database" --turns 3 > "$T/out4" 2>&1
 check "discuss returns with the question when a peer needs a human" 'grep -q "is paused" "$T/out4" && grep -q "Heimserver asks: Which database" "$T/out4"'
 ROOM4="$(a rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p')"

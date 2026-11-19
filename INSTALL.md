@@ -2,7 +2,9 @@
 
 This file is written for a Claude Code agent that a user asked to install agora-mesh. Follow the steps in order and show the user what you do.
 
-This installs the plugin. The first call of `agora` downloads the binary for this platform from the GitHub release `v<plugin version>` and checks it against `SHA256SUMS`. Needs `curl` or `wget` and `sha256sum` or `shasum` (macOS has `shasum`).
+> **No release has been published yet.** Until the repository has a release, the launcher has nothing to download: step 5 fails with "download failed". If that happens, tell the user that agora-mesh has to be built from source for now (`cargo build --release`, then set `AGORA_BIN` to `target/release/agora`), and stop.
+
+Installing the plugin adds the `agora` command, a skill, a hook that starts the daemon when a session starts, and a monitor that tells the session about events. The first call of `agora` downloads the binary for this platform from the GitHub release `v<plugin version>` and checks it against `SHA256SUMS`. That needs `curl` or `wget`, and `sha256sum` or `shasum`.
 
 ## Rules for the installing agent
 
@@ -13,17 +15,14 @@ This installs the plugin. The first call of `agora` downloads the binary for thi
 
 ## Steps
 
-1. **Check the platform.** Supported: macOS 13+, Windows 10 1809+, Ubuntu 20.04+, Debian 10+, Alpine 3.19+; x64 or ARM64. On Windows, Git for Windows must be installed; the Windows launcher (`bin/agora.cmd`) is best-effort and untested.
+1. **Check the platform.** Tested: macOS on x64 and Linux on x64. Built but untested: macOS and Linux on ARM64, Linux with musl, Windows on x64. On Windows, Git for Windows must be installed, and the launcher `bin/agora.cmd` has never been run; say so to the user.
 2. **Install the plugin.**
    ```
-   claude plugin marketplace add kn0sti/agora-mesh
-   claude plugin install agora-mesh@agora-mesh
+   claude plugin install agora-mesh --marketplace kn0sti/agora-mesh
    ```
-   If the user asked for the one-liner form, `claude plugin install agora-mesh --marketplace kn0sti/agora-mesh` is equivalent. The plugin adds `agora` to the PATH of the Bash tool, a SessionStart hook that starts the daemon on a set-up machine, and a monitor that shows `agora events --follow`. Start a new session afterwards so these load.
+   Tell the user to start a new session afterwards, so that the command, the hook and the monitor load.
 3. **Show the security warning** from the "Security" section of `README.md` to the user in full and ask them to confirm it in their own words.
-4. **Ask the user** for:
-   - a peer name for this machine, for example `MacBook` or `Heimserver`;
-   - whether this machine should run the daemon permanently as a system service (recommended for machines that are always on) or only while a session is open.
-5. **Set up** with `agora setup --name <peer-name>` and report the output. The first call downloads the binary; if the download or checksum check fails, stop and show the error. The daemon starts by itself on the next call and at every session start. Developers can set `AGORA_BIN` to a local `cargo build` binary to skip the download.
-6. **Check** with `agora status`. It should show the peer name and no networks.
-7. **Explain the next step** to the user: `agora open` on one machine, `agora join <network-id>` on the other, then `agora approve <name>` on the first after comparing the four words shown on both screens.
+4. **Ask the user** for a name for this machine, for example `MacBook` or `Heimserver`. One word, no spaces.
+5. **Set up** with `agora setup --name <name>` and report the output. This first call downloads the binary; if the download or the checksum check fails, stop and show the error.
+6. **Check** with `agora status`. It should show the name and "no networks". The daemon now runs; it starts again with every Claude Code session and with every `agora` command, but not when the machine boots.
+7. **Explain the next step** to the user: `agora open` on one machine, `agora join <network-id>` on the other, compare the four words that `agora status` shows on both, then `agora approve <name>` on the first.

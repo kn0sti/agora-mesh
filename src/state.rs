@@ -23,6 +23,11 @@ pub struct Network {
     pub opener: String,
     /// All other members (never contains ourselves).
     pub peers: Vec<Member>,
+    /// Counts the changes to the member list. A list from a peer replaces
+    /// ours only if its count is higher, so a peer that was away cannot bring
+    /// back a member that was revoked meanwhile.
+    #[serde(default)]
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +58,22 @@ pub fn home() -> PathBuf {
     }
 }
 
+/// Writes a file only its owner can read, from the first byte on.
+pub fn write_private(path: &std::path::Path, content: &str) -> Result<()> {
+    use std::io::Write;
+    let _ = std::fs::remove_file(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(path).with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(content.as_bytes())?;
+    Ok(())
+}
+
 impl State {
     pub fn path() -> PathBuf {
         home().join("state.json")
@@ -71,12 +92,7 @@ impl State {
         std::fs::create_dir_all(home())?;
         let p = Self::path();
         let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
+        write_private(&tmp, &serde_json::to_string_pretty(self)?)?;
         std::fs::rename(&tmp, &p)?;
         Ok(())
     }

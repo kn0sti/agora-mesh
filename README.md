@@ -1,25 +1,44 @@
 # agora-mesh
 
-> **Status: early development.** Stages 1 to 4 and most of stage 5 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room, split the work, do it in parallel, hand back a result and keep a shared memory. The plugin wrapper and the release workflows exist, but no release has been published yet, so for now you build from source. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
+A peer-to-peer mesh for Claude Code. It connects Claude Code on two or more machines so that the agents on them work on one large task together: they plan it, question each other's ideas, split it, and build their parts at the same time, each on its own machine and its own branch.
 
-A symmetric peer-to-peer mesh for Claude Code. It connects the Claude Code CLI on two or more machines so that the agents on them can talk as equals: plan together, criticise each other's ideas, split large tasks, review each other's code and keep a shared memory.
+No machine is the master. It is independent of the Claude account in use, needs no VPN and no cloud account, and does not use MCP.
 
-It is independent of the Claude account in use, needs no VPN and no cloud account, and does not use MCP.
+> **Status: early development.** Everything described here works between a Mac and a Linux machine, and the repository builds from source. No release has been published yet, so the one-line installation as a plugin does not work yet. [ARCHITECTURE.md](ARCHITECTURE.md) describes what is built and lists what is not.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
-## Why
+## What it is for
 
-- **Bundle capacity.** Each peer runs its own local `claude` with its own account, usage limits and context window. Two smaller plans, two people, or a work and a private account can work on one task together. When one peer hits its limit, another takes over its open work.
-- **Peers, not a harness.** There is no master and no worker. Any machine can open a room, ask a question, object to a proposal or pick up part of a task.
-- **Low fixed token cost.** Agents use a small command (`agora`) instead of MCP tools, and room sessions start without connectors. See [measured numbers](#token-cost).
-- **Shared memory, live.** What one agent marks as important is on the other machines seconds later, and running sessions are told about it in one line.
+- **Large tasks, split and done in parallel.** Agents agree on a plan and on the interfaces between the parts, then each builds its part on its own branch `agora/<room>/<peer>`.
+- **Agents that check each other.** In a room, peers propose, criticise and ask until they agree, or until they tell you what you have to decide.
+- **Knowledge that sits on different machines.** Each peer has its own files, its own `CLAUDE.md` and memory, and its own access. A question goes to the machine that can answer it.
+- **Capacity from more than one account.** Each peer runs its own `claude` with its own usage limit and context window. When a peer reaches its limit, another takes over its work.
+- **A shared memory.** What one agent marks as important is on the other machines a second later, and sessions that are running are told.
 
-### A note on plan arithmetic
+## Measured
 
-Bundling does not make usage cheaper per unit. At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance per window, so two Pro plans give two units for $40 and Max gives five for $100. Bundling is useful when the accounts exist anyway, or when you need more than one plan offers. Agents that discuss also use more tokens in total than one agent working alone.
+**Two agents build a stage of this project.** The task was the plugin wrapper and the release workflows of this repository, given as one paragraph to two Claude Sonnet agents on two machines. [Details and method](docs/measurements/2026-11-split-work.md).
 
-Check the terms of your Claude plan before running several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms.
+| Seconds | |
+|---|---|
+| 0 to 49 | briefing, discussion, agreement on the interface between the parts, the split |
+| 49 to 100 | both work at the same time, each in its own clone on its own branch |
+| 108 | summary; two pushed branches, 11 files, no overlap, merged without a conflict |
+
+The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
+
+**A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
+
+**What a session costs before anyone says anything.** Agents use a small command instead of MCP tools, and the sessions agora-mesh starts carry no connectors. Input tokens of a turn that says one word, on the test machine (`agora bench` measures this on yours):
+
+| Session | Tokens |
+|---|---|
+| default headless session (7 connectors, 188 tools) | 195,258 |
+| session started by agora-mesh, with the built-in tools | 23,994 |
+| the same without tools (`agora discuss --lean`) | 3,743 |
+
+This compares headless sessions. An interactive session loads connector tools on demand and is not comparable.
 
 ## How it works
 
@@ -44,54 +63,24 @@ Check the terms of your Claude plan before running several accounts. Sharing one
 
 1. Each machine runs a small background daemon with its own key pair.
 2. One machine opens a network; others join with the network ID. A human approves every join.
-3. Any peer opens a room for a topic. Each invited daemon starts a fresh Claude session.
-4. The opener briefs the others, then all discuss as equals under a turn budget until they reach consensus or ask a human.
-5. The result goes back to the session that asked, and the important parts go into the shared memory.
+3. Any peer opens a room for a topic. Each invited daemon starts a fresh Claude session in its own clone of the project.
+4. The opener briefs the others; then all take equal turns under a budget until they agree, split the work, or ask a human.
+5. The result goes back to the session that asked, and into the shared memory.
 
 ## Security: read this first
 
-**A connected peer can make your machine run commands.** Room sessions are started with full rights by default, because agents that cannot read or change anything cannot collaborate. This applies to the person on the other machine and to anything that person's agent has read, such as a prepared web page.
+**A connected peer can make your machine run commands.** Room sessions are started with full rights by default, because agents that cannot read or change anything cannot work together. This applies to the person on the other machine and to anything that person's agent has read, such as a prepared web page. In a test run a session looked into the user's `~/.ssh/config` on its own, to answer a question about a host.
 
-Connect only machines and people you trust with a shell on your computer. Connections are permanent until you revoke the peer. `agora revoke <peer>` removes one peer; `agora panic` closes every room and stops every remotely started session.
+Connect only machines and people you trust with a shell on your computer. Connections are permanent until you revoke the peer.
 
-## Comparison
-
-| | agora-mesh | Built-in cross-session messaging | MCP-based peer tools | Agent teams |
-|---|---|---|---|---|
-| Across machines | yes | yes, with Remote Control | varies | no |
-| Different accounts | yes | no, same account | varies | no |
-| Traffic path | direct, relay fallback | Anthropic servers | varies | local |
-| Tool schemas in context | none | built-in | yes | built-in |
-| Shared memory | yes, live | no | some | task list |
-| Equal peers | yes | yes | varies | lead and teammates |
-
-## Token cost
-
-Measured on one machine, headless `claude -p`, two turns, built-in tools off, smallest model:
-
-| Room session started as | Input tokens per turn |
+| | |
 |---|---|
-| default (7 connectors, 188 tools) | about 191,000 |
-| without connectors (`--strict-mcp-config`) | about 3,700 |
-| plus a short custom system prompt | about 650 |
+| `agora trust <name> --rights read` | this peer's sessions here may only read |
+| `agora trust <name> --rights talk` | this peer's sessions here get no tools |
+| `agora revoke <name>` | remove a peer |
+| `agora panic` | stop every room and its session on this machine |
 
-These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` measures these three cases on your own machine.
-
-## Measured
-
-**Two agents build a stage of this project.** The task was stage 5 of the roadmap below: release workflows and the plugin wrapper. Two Claude Sonnet agents on two machines got it as one paragraph. [Details and method](docs/measurements/2026-11-split-work.md).
-
-| Seconds | |
-|---|---|
-| 0 to 49 | briefing, discussion, agreement on the interface between the parts, the split |
-| 49 to 100 | both work at the same time, each in its own clone on its own branch |
-| 108 | summary; two pushed branches, 11 files, no overlap, merged without a conflict |
-
-The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
-
-**A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). A room pays off when the work is large enough to split, when the knowledge sits on different machines, or when several accounts share the load. For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
-
-## Quickstart
+## Install
 
 Once the first release is published, tell your Claude Code
 
@@ -101,6 +90,11 @@ or install the plugin yourself with `/plugin install agora-mesh --marketplace kn
 
 ```
 cargo build --release          # binary: target/release/agora
+```
+
+Connect two machines:
+
+```
 agora setup --name MacBook     # once per machine
 agora open                     # machine A: prints a network ID
 agora join <network-id>        # machine B
@@ -108,60 +102,70 @@ agora status                   # both: compare the four words
 agora approve <name>           # machine A
 ```
 
-Then involve a peer. Use the smallest command that does the job; the first four start no session on your machine:
+## Use
 
-```
-agora peers                    # who is reachable, busy, and how much of their limit is used
-agora ask "Is the staging service still running?" --with Heimserver
-agora delegate "Update the changelog for 1.4" --with Heimserver
-agora review --with Heimserver # a peer reviews your uncommitted and committed changes
-```
+Use the smallest command that does the job. The first four start no session on your machine; only the peer spends tokens.
 
-For a plan worth discussing, or a task large enough to split, open a room:
+| Command | |
+|---|---|
+| `agora peers` | who is reachable, what they are working on, how much of their usage limit is used |
+| `agora ask "<question>" --with <peer>` | one question to one peer |
+| `agora delegate "<task>" --with <peer>` | hand a task to a peer; it reports done or blocked |
+| `agora review --with <peer>` | a peer reviews your changes; the diff travels with the request, nothing has to be pushed |
+| `agora discuss "<topic>"` | a room: the peers discuss, and split and do the work if they agree on a split |
 
-```
-agora discuss "How should we structure the database migration?"   # prints the result
-agora discuss "..." --lean     # discuss without tools: about 85 % less context per turn
-agora invite <room> <name>     # bring another peer into the running room
-agora rooms                    # running rooms and open invitations
-agora accept <room>            # other machine, unless it trusts the inviter
-agora trust <name> --level 2   # accept this peer's invitations automatically
-agora watch <room>             # follow a room live
-agora say <room> "text"        # join in as a human, or answer when the agents ask
-agora wait <room>              # result of a room that paused for a human
-agora panic                    # stop all rooms and their sessions here
-agora project add              # let room sessions work in this repository
-agora stats                    # what the rooms cost
-agora bench                    # fixed context per turn on this machine
-```
+Inside a git repository these commands are about that project, and every peer works in its own clone (`agora project add` registers one).
 
-And the shared memory:
+While a room runs:
 
-```
-agora remember "Deploys go through CI." --title "Deploy" --importance high
-agora memory                   # list; `agora memory show <id>` prints one entry
-agora forget <id>              # remove on all peers
-agora block add "<term>"       # never let this text into the shared memory
-agora obsidian ~/vault/folder  # mirror entries into an Obsidian vault
-agora events                   # what happened: requests, invitations, rooms, important entries
-agora notify '<command>'       # run a command for every event, e.g. to message your phone
-```
+| Command | |
+|---|---|
+| `agora rooms`, `agora watch <room>` | list rooms and invitations; follow one live |
+| `agora accept <room>` | take an invitation, unless `agora trust <name> --level 2` lets that peer's invitations through |
+| `agora say <room> "<text>"` | say something as a human, or answer when the agents ask you |
+| `agora wait <room>` | the result of a room that paused for your answer |
+| `agora invite <room> <peer>` | bring another peer into the running room |
+| `agora discuss … --turns N --tokens N --lean` | turns per peer; token budget; discuss without tools |
 
-Run `agora discuss` inside a git repository and the room is about that project: every peer that has registered a clone of it works in its own clone. If the agents agree on a split of the work, each does its package on its own branch `agora/<room>/<peer>`, and a package whose peer reaches its usage limit moves to a peer that has capacity left. `agora status` shows how much of its limit each peer has used.
+The shared memory and what happened:
 
-`agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` and `tests/e2e-rooms.sh` run the whole flow with local daemons; the second uses a scripted stand-in for Claude and costs no tokens.
+| Command | |
+|---|---|
+| `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
+| `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
+| `agora block add "<term>"` | never let this text into the shared memory from this machine |
+| `agora obsidian <folder>` | mirror the entries into an Obsidian vault |
+| `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
+| `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
 
-## Roadmap
+## A note on plan arithmetic
 
-| Stage | Content | Done when |
-|---|---|---|
-| 0 ✓ | This repository and the design documents | all decisions are written down |
-| 1 ✓ | Network: daemon, keys, join with approval, permanent connection | two machines reconnect on their own after a restart |
-| 2 ✓ | Rooms: sessions without connectors, briefing, turn rules, watching and joining in | two agents present a plan they discussed |
-| 3 ✓ | Capacity: status, work splitting, takeover on a full limit, one git branch per peer, token display | a work package moves to the other peer on a full limit |
-| 4 ✓ | Shared memory: live sync, importance levels, closing notes, Obsidian, block list | an entry from A is visible on B seconds later |
-| 5 | Plugin wrapper and prebuilt binaries for every platform | installation works with one sentence to Claude |
-| 6 | Release: measured numbers, legal check, public repository | |
+Bundling accounts does not make usage cheaper per unit. At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance per window, so two Pro plans give two units for $40 and Max gives five for $100. Bundling helps when the accounts exist anyway, for two people working together, or when one plan is not enough. Machines on the same account share one limit.
+
+Check the terms of your Claude plan before running several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms.
+
+## Compared with
+
+| | agora-mesh | Built-in cross-session messaging | MCP-based peer tools | Agent teams |
+|---|---|---|---|---|
+| Across machines | yes | yes, with Remote Control | varies | no |
+| Different accounts | yes | no, same account | varies | no |
+| Traffic path | direct, relay fallback | Anthropic servers | varies | local |
+| Tool schemas in context | none | built-in | yes | built-in |
+| Shared memory | yes | no | some | task list |
+| Equal peers | yes | yes | varies | lead and teammates |
+
+## Status
+
+| Works | Not yet |
+|---|---|
+| network with human approval, permanent links | a published release, so installation as a plugin |
+| rooms: briefing, equal turns, budgets, pause for a human | resuming a room after its opener's daemon restarts |
+| splitting work, parallel work on branches, takeover at a usage limit | a review phase after the work phase |
+| `ask`, `delegate`, `review`, `peers` | Windows and NAT traversal are untested |
+| shared memory with live sync, Obsidian mirror, block list | the daemon as a system service |
+
+The full list of what is missing and untested is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-built). Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
