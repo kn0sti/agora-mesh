@@ -266,6 +266,43 @@ pub fn list(network: &str, names: Names) -> String {
     if out.is_empty() { "no entries\n".to_string() } else { out }
 }
 
+/// A note a human wrote in the Obsidian folder.
+#[derive(Debug, PartialEq)]
+pub struct Note {
+    pub title: String,
+    pub importance: String,
+    pub body: String,
+}
+
+/// Reads a Markdown note. A front matter block may name `title` and
+/// `importance`; without one the title is the file name and the importance
+/// normal. The files this module writes itself parse back to their entry.
+pub fn parse_note(text: &str, file_stem: &str) -> Note {
+    let mut title = file_stem.trim().to_string();
+    let mut importance = "normal".to_string();
+    let mut body = text;
+    if let Some(rest) = text.strip_prefix("---\n") {
+        if let Some(end) = rest.find("\n---") {
+            for line in rest[..end].lines() {
+                let Some((key, value)) = line.split_once(':') else { continue };
+                let value = value.trim();
+                match key.trim() {
+                    "title" if !value.is_empty() => title = value.to_string(),
+                    "importance" if IMPORTANCE.contains(&value) => importance = value.to_string(),
+                    _ => {}
+                }
+            }
+            body = &rest[end + 4..];
+        }
+    }
+    Note { title, importance, body: body.trim().to_string() }
+}
+
+/// Where a network's entries are mirrored inside an Obsidian vault folder.
+pub fn mirror_dir(mirror: &str, network: &str) -> PathBuf {
+    Path::new(mirror).join("agora").join(network)
+}
+
 /// True if `text` contains a term this machine never shares.
 pub fn blocked<'a>(blocklist: &'a [String], text: &str) -> Option<&'a str> {
     let t = text.to_lowercase();
@@ -345,6 +382,23 @@ mod tests {
         for bad in ["../../.claude", "/etc", "a/b", "", "x y", "..", "0a1b2c3d4e5f0a1b2c3d4e5f0a1b2c3d4e5f"] {
             assert!(dir(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_note_from_obsidian_is_read_with_or_without_front_matter() {
+        assert_eq!(parse_note("Backups run at night.\n", "Backup plan"), Note { title: "Backup plan".into(), importance: "normal".into(), body: "Backups run at night.".into() });
+        let with = "---\ntitle: Deploy: the rules\nimportance: high\ntags: [x]\n---\n\nUse CI.\n";
+        assert_eq!(parse_note(with, "deploy"), Note { title: "Deploy: the rules".into(), importance: "high".into(), body: "Use CI.".into() });
+        // An unknown importance and an unfinished front matter do not break the note.
+        assert_eq!(parse_note("---\nimportance: urgent\n---\nx", "n").importance, "normal");
+        assert_eq!(parse_note("---\ntitle: lost\nno end", "n").title, "n");
+    }
+
+    #[test]
+    fn a_mirrored_entry_reads_back_as_itself() {
+        let e = entry(3);
+        let note = parse_note(&e.render(&|_| "Mac".to_string()), "deploy");
+        assert_eq!((note.title, note.importance, note.body), (e.title, e.importance, e.body));
     }
 
     #[test]

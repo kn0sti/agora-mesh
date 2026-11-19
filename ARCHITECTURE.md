@@ -213,7 +213,12 @@ The author shown for an entry is the name this machine knows that peer by, not w
 
 **Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
 
-**Obsidian.** `agora obsidian <vault folder>` mirrors new and changed entries of importance high and normal to `<folder>/agora/<network>/`, one way.
+**Obsidian.** `agora obsidian <vault folder>` connects the memory with an Obsidian vault in both directions.
+
+- Outwards: new and changed entries of importance high and normal are written to `<folder>/agora/<network>/<id>.md`.
+- Inwards: the daemon looks at that folder every three seconds. A note that is new or has changed becomes an entry on all peers, written by this machine. The title is the `title` of the front matter or the file name, the importance the `importance` of the front matter or normal. A note under another name than its id is renamed to `<id>.md`, with the front matter added.
+- A note that reads back as the entry it mirrors is left alone, so entries from other peers are not imported again as changes.
+- The block list applies: a note with a blocked term stays out of the memory. Deleting a note does not delete the entry; `agora forget <id>` does.
 
 **Events.** The daemon appends join requests, invitations, paused and closed rooms and high-importance entries to `events.log`. `agora events` prints the last ones, `agora events --follow` each new one as it happens. `agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
 

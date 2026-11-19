@@ -269,6 +269,63 @@ fn remember(shared: &Shared, network: &str, id: Option<&str>, title: &str, body:
     Ok(entry)
 }
 
+/// Notes a human writes or changes in the Obsidian folder become entries of the
+/// shared memory, so the vault works in both directions. The folder is looked
+/// at every few seconds; a file is read again only when it has changed.
+async fn obsidian_loop(shared: Arc<Shared>) {
+    let mut seen: HashMap<std::path::PathBuf, std::time::SystemTime> = HashMap::new();
+    loop {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (mirror, networks) = {
+            let state = shared.state.lock().unwrap();
+            let active: Vec<String> = state.networks.iter().filter(|n| n.status == NetStatus::Active).map(|n| n.id.clone()).collect();
+            (state.obsidian.clone(), active)
+        };
+        let Some(mirror) = mirror else {
+            seen.clear();
+            continue;
+        };
+        for network in networks {
+            let Ok(files) = std::fs::read_dir(memory::mirror_dir(&mirror, &network)) else { continue };
+            let entries = memory::load(&network);
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Ok(modified) = file.metadata().and_then(|m| m.modified()) else { continue };
+                // Unchanged since we last looked, or still being written.
+                if seen.get(&path) == Some(&modified) || modified.elapsed().is_ok_and(|age| age < Duration::from_secs(2)) {
+                    continue;
+                }
+                seen.insert(path.clone(), modified);
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let note = memory::parse_note(&text, &stem);
+                if note.body.is_empty() {
+                    continue;
+                }
+                let id = memory::slug(&stem);
+                // The files this daemon mirrors itself read back as their entry: nothing to do.
+                let same = entries.get(&id).is_some_and(|e| !e.deleted && e.title.trim() == note.title && e.importance == note.importance && e.body.trim() == note.body);
+                if same {
+                    continue;
+                }
+                match remember(&shared, &network, Some(&id), &note.title, &note.body, &note.importance, false) {
+                    Ok(e) => {
+                        eprintln!("obsidian: \"{}\" is now entry {} of the shared memory", e.title, e.id);
+                        // The entry is mirrored back as <id>.md; a note under another name would be a second copy.
+                        if path.file_name().and_then(|n| n.to_str()) != Some(format!("{}.md", e.id).as_str()) {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                    Err(e) => eprintln!("obsidian: {} was not taken into the shared memory: {e}", path.display()),
+                }
+            }
+        }
+    }
+}
+
 pub fn secret_key_from_hex(hex: &str) -> Result<SecretKey> {
     let bytes = data_encoding::HEXLOWER.decode(hex.as_bytes()).map_err(|_| anyhow!("secret key in state.json is damaged"))?;
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("secret key has the wrong length"))?;
@@ -312,6 +369,7 @@ pub async fn run() -> Result<()> {
     prune_rooms();
 
     tokio::spawn(accept_loop(shared.clone()));
+    tokio::spawn(obsidian_loop(shared.clone()));
     tokio::spawn(dial_loop(shared.clone()));
 
     loop {
@@ -1054,7 +1112,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             }
             state.obsidian = Some(path.clone());
             state.save()?;
-            Ok(format!("New and changed entries are mirrored to {path}/agora/<network>/."))
+            Ok(format!("Entries are mirrored to {path}/agora/<network>/, and notes you write or change there become entries on all peers."))
         }
         "project" => {
             let action = arg("action")?;

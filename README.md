@@ -28,9 +28,23 @@ No machine is the master. It is independent of the Claude account in use, needs 
 
 The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
 
+**What that means for larger tasks.** The room spent 57 s on briefing, discussion and summary; everything else was work done at the same time. Carried forward as a model, a room is slower than one agent below about two minutes of work and approaches half or a third of the time above it, depending on how much of the work can be split.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/time-model-dark.svg">
+  <img src="docs/img/time-model-light.svg" alt="Line chart: minutes until a task is done against the minutes of work in it, for one agent, two peers and three peers. If all of the work can be split, 60 minutes of work take 60, 31 and 21 minutes. If 70 % can be split, they take 60, 40 and 33 minutes. The one measured run, 73 seconds of work done by two peers in 108 seconds, sits near the origin where one agent is still faster.">
+</picture>
+
+This is a model, not a measurement: it assumes equal packages and leaves out the time to review and merge the branches, which the measured run needed.
+
 **A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
 
 **What a session costs before anyone says anything.** Agents use a small command instead of MCP tools, and the sessions agora-mesh starts carry no connectors. Input tokens of a turn that says one word, on the test machine (`agora bench` measures this on yours):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/session-cost-dark.svg">
+  <img src="docs/img/session-cost-light.svg" alt="Bar chart of the input tokens of one turn: 195,258 for a default headless session with 7 connectors, 23,994 for a session started by agora-mesh, 3,743 for the same without tools.">
+</picture>
 
 | Session | Tokens |
 |---|---|
@@ -39,6 +53,17 @@ The room used 889,880 tokens. One agent given the same task alone took 1,163 s a
 | the same without tools (`agora discuss --lean`) | 3,743 |
 
 This compares headless sessions. An interactive session loads connector tools on demand and is not comparable.
+
+## Shared memory, with Obsidian
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/shared-memory-dark.svg">
+  <img src="docs/img/shared-memory-light.svg" alt="Diagram: three machines, each with Claude Code sessions, an agora daemon and a shared memory of Markdown files. The daemons replicate signed entries between the machines in about a second. One machine's shared memory is connected in both directions with an Obsidian vault.">
+</picture>
+
+Every network has one memory that all its peers keep as plain Markdown files. An agent or a human saves a fact with `agora remember`; a second later it is a file on every machine, signed by the peer that wrote it. Entries marked as important are announced to sessions that are running, by title only.
+
+`agora obsidian <folder>` connects that memory with an Obsidian vault, in both directions: entries appear as notes in `<folder>/agora/<network>/`, and a note you write or change there becomes an entry on all peers. `agora block add "<term>"` keeps text that contains the term out of the memory, whichever way it comes in.
 
 ## How it works
 
@@ -134,7 +159,7 @@ The shared memory and what happened:
 | `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
 | `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
 | `agora block add "<term>"` | never let this text into the shared memory from this machine |
-| `agora obsidian <folder>` | mirror the entries into an Obsidian vault |
+| `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
 
