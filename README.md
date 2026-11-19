@@ -32,10 +32,7 @@ The room used 889,880 tokens. One agent given the same task alone took 1,163 s a
 
 **What that means for larger tasks.** The room spent 57 s on briefing, discussion and summary; everything else was work done at the same time. Carried forward as a model, a room is slower than one agent below about two minutes of work and approaches half or a third of the time above it, depending on how much of the work can be split.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/time-model-dark.svg">
-  <img src="docs/img/time-model-light.svg" alt="Line chart: minutes until a task is done against the minutes of work in it, for one agent, two peers and three peers. If all of the work can be split, 60 minutes of work take 60, 31 and 21 minutes. If 70 % can be split, they take 60, 40 and 33 minutes. The one measured run, 73 seconds of work done by two peers in 108 seconds, sits near the origin where one agent is still faster.">
-</picture>
+![Line chart: minutes until a task is done against the minutes of work in it, for one agent, two peers and three peers. If all of the work can be split, 60 minutes of work take 60, 31 and 21 minutes. If 70 % can be split, they take 60, 40 and 33 minutes. The one measured run, 73 seconds of work done by two peers in 108 seconds, sits near the origin where one agent is still faster.](docs/img/time-model-light.png)
 
 This is a model, not a measurement: it assumes equal packages and leaves out the time to review and merge the branches, which the measured run needed.
 
@@ -45,10 +42,7 @@ This is a model, not a measurement: it assumes equal packages and leaves out the
 
 **What a session costs before anyone says anything.** Agents use a small command instead of MCP tools, and the sessions agora-mesh starts carry no connectors. Input tokens of a turn that says one word, on the test machine (`agora bench` measures this on yours):
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/session-cost-dark.svg">
-  <img src="docs/img/session-cost-light.svg" alt="Bar chart of the input tokens of one turn: 195,258 for a default headless session with 7 connectors, 23,994 for a session started by agora-mesh, 3,743 for the same without tools.">
-</picture>
+![Bar chart of the input tokens of one turn: 195,258 for a default headless session with 7 connectors, 23,994 for a session started by agora-mesh, 3,743 for the same without tools.](docs/img/session-cost-light.png)
 
 | Session | Tokens |
 |---|---|
@@ -60,10 +54,7 @@ This compares headless sessions. An interactive session loads connector tools on
 
 ## Shared memory, with Obsidian
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/shared-memory-dark.svg">
-  <img src="docs/img/shared-memory-light.svg" alt="Diagram: three machines, each with Claude Code sessions, an agora daemon and a shared memory of Markdown files. The daemons replicate signed entries between the machines in about a second. One machine's shared memory is connected in both directions with an Obsidian vault.">
-</picture>
+![Diagram: three machines, each with Claude Code sessions, an agora daemon and a shared memory of Markdown files. The daemons replicate signed entries between the machines in about a second. One machine's shared memory is connected in both directions with an Obsidian vault.](docs/img/shared-memory-light.png)
 
 Every network has one memory that all its peers keep as plain Markdown files. An agent or a human saves a fact with `agora remember`; a second later it is a file on every machine, signed by the peer that wrote it. Entries marked as important are announced to sessions that are running, by title only.
 
@@ -170,10 +161,7 @@ The shared memory and what happened:
 
 ## Several small plans on one project
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/own-accounts-dark.svg">
-  <img src="docs/img/own-accounts-light.svg" alt="Diagram: three machines, each on its own $20 plan with its own usage meter, feed one room in which the agents brief each other, discuss, agree on a plan and split the work. The result is a plan or one branch per peer.">
-</picture>
+![Diagram: three machines, each on its own $20 plan with its own usage meter, feed one room in which the agents brief each other, discuss, agree on a plan and split the work. The result is a plan or one branch per peer.](docs/img/own-accounts-light.png)
 
 Peers do not share an account. Each machine uses the Claude Code login it already has, with its own usage limit and its own context window, and the mesh never sees a login or a token: it only starts the local `claude`.
 
