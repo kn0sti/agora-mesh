@@ -7,6 +7,8 @@
 #   FAKE_LIMIT=1     fails with a usage-limit error when asked to work on a package
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
 #   FAKE_DELAY       seconds to wait before every answer
+# The arguments of every start are appended to $AGORA_HOME/fake-args.log.
+[ -n "${AGORA_HOME:-}" ] && echo "$*" >> "$AGORA_HOME/fake-args.log"
 n=0
 human=0
 memory=""
@@ -23,16 +25,32 @@ while IFS= read -r line; do
   # Says so once it has been told about a new shared-memory entry.
   case "$line" in *"[shared memory, new]"*) memory=" saw-memory-notice" ;; esac
   case "$line" in
+    *"Review this change"*)
+      case "$line" in
+        *"+changed line"*) answer "notes.txt:1 - saw the diff - looks fine" ;;
+        *) answer "no diff arrived" ;;
+      esac ;;
+    *"hands you a task"*) answer "DONE\\nDid the task. cwd=$(basename "$PWD")" ;;
+    *"asks you one question"*) answer "The deadline is Friday. cwd=$(basename "$PWD")" ;;
     *"The work phase is over"*) answer "WORKRESULT: all packages are reported." ;;
     *"Work phase. Package #"*)
       if [ "${FAKE_LIMIT:-0}" = 1 ]; then limit
-      else answer "DONE\\nDid the work. cwd=$(basename "$PWD")"
+      else
+        plan=""
+        case "$line" in *"The room agreed on this plan"*) plan=" got-the-plan" ;; esac
+        answer "DONE\\nDid the work. cwd=$(basename "$PWD")$plan"
       fi ;;
     *"Write the briefing"*) answer "Goal: agree on a plan. Known: nothing yet." ;;
     *"First line: KNOWN_MISSING"*) answer "KNOWN_MISSING\\nI know the goal. I am missing the deadline. cwd=$(basename "$PWD")" ;;
     *"fill the gaps"*) answer "ANSWER\\nThe deadline is Friday." ;;
     *"reached consensus"*) answer "FINAL: the agreed plan." ;;
     *"closes without consensus"*) answer "OVERVIEW: agreed nothing, disputed everything." ;;
+    *"You join this room while it is running"*)
+      n=$((n + 1))
+      case "$line" in
+        *"· BRIEF]"*) answer "CRITIQUE\\nLate, but I read what was said. saw-catch-up" ;;
+        *) answer "CRITIQUE\\nLate, and nobody told me anything." ;;
+      esac ;;
     *"Your turn"*)
       n=$((n + 1))
       if [ "${FAKE_STUBBORN:-0}" = 1 ]; then answer "CRITIQUE\\nStill not convinced ($n).$memory"

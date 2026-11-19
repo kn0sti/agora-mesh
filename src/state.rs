@@ -40,6 +40,9 @@ pub struct State {
     /// Obsidian vault folder that mirrors the shared memory.
     #[serde(default)]
     pub obsidian: Option<String>,
+    /// Shell command run for every event, see `agora notify`.
+    #[serde(default)]
+    pub notify: Option<String>,
 }
 
 /// Data directory. `AGORA_HOME` overrides it, which lets two daemons run on one machine.

@@ -224,3 +224,34 @@ A peer's private Claude memory is never read or written.
 | An agent writing to the shared memory on its own, with a real session | 4 |
 | Plugin monitor and Windows behaviour in practice | 5 |
 | Original wording of Anthropic's terms on several accounts | 6 |
+
+## 12. Everyday commands
+
+A room is the expensive way to involve a peer. Three commands do less and cost less. None of them starts a session on the calling machine; only the peer spends tokens.
+
+| Command | What happens on the peer |
+|---|---|
+| `agora ask "<question>" --with <peer>` | one turn that answers the question |
+| `agora delegate "<task>" --with <peer>` | one long turn that carries out the task, on the branch `agora/<id>/<peer>` if it has a clone of the project, and reports `DONE` or `BLOCKED` |
+| `agora review --with <peer> [--base <ref>]` | one turn that reviews the diff of the working tree against the base; the diff travels in the message (up to 150 kB), so nothing has to be pushed |
+
+They use the invitation of a room with `mode` set to `ask` or `task`, so the same rule decides whether the peer starts at once or waits for `agora accept`.
+
+`agora peers` lists everyone: reachable directly or through a relay with the round-trip time, how many rooms each is working on (`BUSY`), and how much of its usage limit is used. A peer's limit is known once a session has run there.
+
+`agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
+
+`plugin/skills/agora/SKILL.md` tells a Claude Code session when to use which command, to offer a peer's help on large tasks instead of imposing it, and what only the user decides.
+
+## 13. Rooms that change while they run
+
+**Joining late.** `agora invite <room> <peer>` brings a peer into a running room. Its invitation carries what was said so far (everything if short, otherwise the briefing and the last six messages) and the number of the last message, so it receives only what follows. It is added to the speaking order before the opener.
+
+**Lean rooms.** `agora discuss --lean` starts the discussion sessions without tools, which cuts the fixed context per turn from about 24,000 to about 3,700 tokens. The agents then cannot look anything up while they discuss. For the work phase each peer starts a second session with tools and gives it the agreed plan.
+
+**Lost links.** Every message of a room has a number, and every contribution of a joiner has a counter. A joiner that sees a gap, or whose link comes back, asks the opener to send again from the number it lacks (`RESEND`) and repeats its last contribution that was not confirmed; the opener ignores a contribution it has already used. The opener repeats an invitation every ten seconds until the peer has joined.
+
+**Lost peers.** A peer that leaves, does not answer within 15 minutes, or whose daemon restarted (the opener asks with `ROOM_PING` when the link is back) drops out of the room. The others go on; a running package of that peer goes to someone else. With fewer than two peers left the room closes with the overview. A room also closes on its turn budget once only one peer has turns left.
+
+**Restarted opener.** Rooms do not survive a restart of the opener's daemon. When the joiners reach it again they are told the room is closed, so nobody waits. Resuming a room after a restart is not built.
+

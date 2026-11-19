@@ -90,7 +90,44 @@ enum Cmd {
         /// Importance of the result in the shared memory: high, normal, low or none
         #[arg(long, default_value = "normal")]
         remember: String,
+        /// Discuss without tools to save tokens; a second session with tools does the work
+        #[arg(long)]
+        lean: bool,
     },
+    /// Invite another peer into a running room you opened
+    Invite { room: String, name: String },
+    /// Ask one peer a single question; no session runs on this machine
+    Ask {
+        question: String,
+        /// Peer name; default: the only peer that is online
+        #[arg(long, default_value = "")]
+        with: String,
+        /// Git repository the question is about; default: the one you are in. "none" for no project
+        #[arg(long, default_value = "")]
+        project: String,
+    },
+    /// Hand a task to one peer to carry out; no session runs on this machine
+    Delegate {
+        task: String,
+        /// Peer name; default: the only peer that is online
+        #[arg(long, default_value = "")]
+        with: String,
+        /// Git repository the task is about; default: the one you are in. "none" for no project
+        #[arg(long, default_value = "")]
+        project: String,
+    },
+    /// All peers at a glance: reachable, busy, and how much of their usage limit is used
+    Peers,
+    /// Let a peer review your changes against a base branch (tracked files, committed or not)
+    Review {
+        #[arg(long, default_value = "")]
+        with: String,
+        /// What to diff against; default: the remote's default branch
+        #[arg(long, default_value = "")]
+        base: String,
+    },
+    /// Run a shell command for every event, for example to message your phone; "off" stops it
+    Notify { command: String },
     /// Save a fact in the shared memory of all peers
     Remember {
         text: String,
@@ -199,10 +236,25 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens, project, remember } => call(
+        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean } => call(
             "discuss",
-            &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens), ("project", project), ("remember", remember), ("cwd", cwd())],
+            &[
+                ("topic", topic),
+                ("with", with),
+                ("turns", turns),
+                ("tokens", tokens),
+                ("project", project),
+                ("remember", remember),
+                ("lean", if lean { "1".into() } else { String::new() }),
+                ("cwd", cwd()),
+            ],
         ),
+        Cmd::Invite { room, name } => call("invite", &[("room", room), ("name", name)]),
+        Cmd::Ask { question, with, project } => call("ask", &[("question", question), ("with", with), ("project", project), ("cwd", cwd())]),
+        Cmd::Delegate { task, with, project } => call("delegate", &[("question", task), ("with", with), ("project", project), ("cwd", cwd())]),
+        Cmd::Peers => call("peers", &[]),
+        Cmd::Review { with, base } => review(with, base),
+        Cmd::Notify { command } => call("notify", &[("command", command)]),
         Cmd::Remember { text, title, importance, network } => {
             call("remember", &[("text", text), ("title", title), ("importance", importance), ("network", network)])
         }
@@ -250,7 +302,7 @@ fn setup(name: &str) -> Result<()> {
     }
     let key: [u8; 32] = rand::random();
     let public = iroh::SecretKey::from_bytes(&key).public();
-    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![], blocklist: vec![], obsidian: None }.save()?;
+    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![], blocklist: vec![], obsidian: None, notify: None }.save()?;
     say!("Set up peer \"{name}\" with id {public}");
     say!("Data directory: {}", state::home().display());
     Ok(())
@@ -308,6 +360,40 @@ fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
     }
 }
 
+/// Sends the difference between the working tree and a base branch to a peer
+/// and prints its findings.
+fn review(with: String, base: String) -> Result<()> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let base = if base.is_empty() {
+        git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "main".into())
+    } else {
+        base
+    };
+    let mut diff = git(&["diff", &base]).ok_or_else(|| anyhow!("could not diff against {base}; run this inside a git repository"))?;
+    if diff.trim().is_empty() {
+        bail!("nothing to review: no difference to {base}");
+    }
+    const MAX: usize = 150_000;
+    let mut note = String::new();
+    if diff.len() > MAX {
+        let mut cut = MAX;
+        while !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        diff.truncate(cut);
+        note = format!("\nThe diff was cut off after {MAX} bytes; say that your review covers only the part you saw.");
+    }
+    let question = format!(
+        "Review this change (diff against {base}). You have your own clone of the project for context, but the change is not applied there; \
+judge what the diff shows. Report findings ordered by severity, one per line as `file:line - problem - suggestion`. \
+Report only what you are confident is wrong or risky, and say plainly if you find nothing.{note}\n\n```diff\n{diff}\n```"
+    );
+    call("ask", &[("question", question), ("with", with), ("project", String::new()), ("cwd", cwd())])
+}
+
 /// Prints events.log: the last 20 lines, or with `follow` every new line as it
 /// is written. The plugin's monitor runs this to tell a session what happened.
 fn events(follow: bool) -> Result<()> {
@@ -355,14 +441,14 @@ fn stats() -> Result<()> {
         return Ok(());
     }
     rows.sort_by_key(|v| v["closed_at"].as_u64().unwrap_or(0));
-    say!("{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}", "room", "role", "msgs", "turns", "in/turn", "out", "all peers", "closed because");
+    say!("{:<9} {:<8} {:>4} {:>5} {:>9} {:>8} {:>10} {:>5}  {}", "room", "role", "msgs", "turns", "in/turn", "out", "all peers", "secs", "closed because");
     let (mut sum_in, mut sum_out) = (0u64, 0u64);
     for v in &rows {
         let n = |k: &str| v[k].as_u64().unwrap_or(0);
         let per_turn = if n("turns") > 0 { n("tokens_in") / n("turns") } else { 0 };
         let all = v["all_peers_tokens"].as_u64().map(|x| x.to_string()).unwrap_or_else(|| "-".into());
         say!(
-            "{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}",
+            "{:<9} {:<8} {:>4} {:>5} {:>9} {:>8} {:>10} {:>5}  {}",
             v["room"].as_str().unwrap_or("?"),
             v["role"].as_str().unwrap_or("?"),
             n("messages"),
@@ -370,6 +456,7 @@ fn stats() -> Result<()> {
             per_turn,
             n("tokens_out"),
             all,
+            n("duration_s"),
             v["reason"].as_str().unwrap_or("?")
         );
         sum_in += n("tokens_in");

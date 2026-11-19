@@ -90,10 +90,21 @@ agora status                   # both: compare the four words
 agora approve <name>           # machine A
 ```
 
-Then let the agents talk:
+Then involve a peer. Use the smallest command that does the job; the first four start no session on your machine:
+
+```
+agora peers                    # who is reachable, busy, and how much of their limit is used
+agora ask "Is the staging service still running?" --with Heimserver
+agora delegate "Update the changelog for 1.4" --with Heimserver
+agora review --with Heimserver # a peer reviews your uncommitted and committed changes
+```
+
+For a plan worth discussing, or a task large enough to split, open a room:
 
 ```
 agora discuss "How should we structure the database migration?"   # prints the result
+agora discuss "..." --lean     # discuss without tools: about 85 % less context per turn
+agora invite <room> <name>     # bring another peer into the running room
 agora rooms                    # running rooms and open invitations
 agora accept <room>            # other machine, unless it trusts the inviter
 agora trust <name> --level 2   # accept this peer's invitations automatically
@@ -115,6 +126,7 @@ agora forget <id>              # remove on all peers
 agora block add "<term>"       # never let this text into the shared memory
 agora obsidian ~/vault/folder  # mirror entries into an Obsidian vault
 agora events                   # what happened: requests, invitations, rooms, important entries
+agora notify '<command>'       # run a command for every event, e.g. to message your phone
 ```
 
 Run `agora discuss` inside a git repository and the room is about that project: every peer that has registered a clone of it works in its own clone. If the agents agree on a split of the work, each does its package on its own branch `agora/<room>/<peer>`, and a package whose peer reaches its usage limit moves to a peer that has capacity left. `agora status` shows how much of its limit each peer has used.
