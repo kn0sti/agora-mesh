@@ -1,0 +1,45 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo test
+      - name: end-to-end scripts
+        run: |
+          set -u
+          fail=0
+          for t in tests/e2e-*.sh; do
+            echo "::group::$t"
+            bash "$t" || { echo "FAILED: $t"; fail=1; }
+            echo "::endgroup::"
+          done
+          exit $fail
+  macos:
+    # macOS minutes count tenfold in a private repository: run them there only on request.
+    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo test
+      - name: end-to-end scripts
+        run: |
+          set -u
+          fail=0
+          for t in tests/e2e-*.sh; do
+            echo "::group::$t"
+            bash "$t" || { echo "FAILED: $t"; fail=1; }
+            echo "::endgroup::"
+          done
+          exit $fail

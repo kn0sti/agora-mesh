@@ -179,7 +179,8 @@ otherwise create it from the current HEAD. Commit your work on it and push it to
     };
     format!(
         "Work phase. Package #{package}: {title}\n{how}{takeover}\n\
-Reply with the first line DONE or BLOCKED, then at most five lines: what you did, the branch, the last commit, and what is left."
+Before you report, run the checks that exist for what you changed (tests, linters, validators) and fix what they find. \
+Reply with the first line DONE or BLOCKED, then at most six lines: what you did, the branch, the last commit, which checks ran and which could not, and what is left."
     )
 }
 
@@ -400,6 +401,7 @@ struct Opener {
     others: String,
     /// Text of the agreed SPLIT_WORK message.
     plan: String,
+    started: std::time::Instant,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -487,6 +489,7 @@ pub async fn run_opener(
         work_dir,
         others,
         plan: String::new(),
+        started,
     };
 
     let brief_topic = match &project {
@@ -972,6 +975,8 @@ and where relevant information can be found. This one message needs no kind on t
             next: next.clone(),
         };
         append(&self.dir, "log.md", &render(&e));
+        // When each message was published, in seconds since the room opened.
+        append(&self.dir, "timeline.tsv", &format!("{}\t{}\t{}\t{}", e.seq, self.started.elapsed().as_secs(), e.from_name, e.kind));
         for j in &self.joiners {
             // A peer that is offline right now asks for what it missed when it is back.
             self.shared.send_to(&j.id, discuss_msg(&self.room_id, &e));
@@ -1228,7 +1233,8 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
             };
             format!(
                 "{asker} hands you a task to carry out on this machine.{project_note}{how} \
-Reply with the first line DONE or BLOCKED, then a short report: what you did, where the result is, and what is left.\n\nTask: {}",
+Before you report, run the checks that exist for what you changed and fix what they find. \
+Reply with the first line DONE or BLOCKED, then a short report: what you did, where the result is, which checks ran, and what is left.\n\nTask: {}",
                 invite.topic
             )
         } else {
