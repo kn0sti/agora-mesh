@@ -144,7 +144,7 @@ Measured in stage 2 with the built-in tools enabled (smallest model): about 25,5
 
 Rights map to the session as follows: `full` starts it with `--permission-mode auto` (Claude Code's own safety classifier stays active; `AGORA_PERMISSION_MODE` overrides the mode), `read` with `--tools Read,Grep,Glob`, `talk` with no tools. `AGORA_CLAUDE_ARGS` appends further arguments, for example a model.
 
-The session runs in a neutral directory per room. Resolving the room's project to a local clone comes with stage 3.
+A room's project is the git repository `agora discuss` was called in (`--project <path>` names another, `--project none` none). The invitation carries its remote in the normalized form `host/owner/repo`. Each machine keeps a list of local clones (`agora project add|list|remove`; the opener's clone is added by itself) and starts the session in the clone whose `origin` matches. Without a match the session runs in a neutral directory per room and is told that it cannot see the project's files. Log and result always stay in the room directory under `~/.agora/rooms/`.
 
 In the current implementation room messages travel on the peer link instead of a stream per room, and a room has one message more than section 6 lists: `SAY`, a joiner's contribution before the opener has numbered it.
 
@@ -183,7 +183,7 @@ Usage instructions ship as a skill, which costs one line of context until it is 
 
 ## 10. Measuring
 
-`agora stats` shows per room and peer: turns, input and output tokens, fixed context per turn. `agora bench` measures the baseline on the local machine (default headless session against a room session). Published comparisons state the method and compare like with like.
+`agora stats` lists the rooms this machine took part in: messages, turns, input tokens per turn, output tokens, and for rooms opened here the total over all peers. `agora bench` measures the fixed context of one turn on the local machine for a default headless session, one without connectors, and a room session; it uses real sessions on the smallest model. Published comparisons state the method and compare like with like.
 
 ## 11. Open points
 

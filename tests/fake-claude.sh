@@ -12,7 +12,7 @@ while IFS= read -r line; do
   case "$line" in *"· HUMAN]"*) human=1 ;; esac
   case "$line" in
     *"Write the briefing"*) answer "Goal: agree on a plan. Known: nothing yet." ;;
-    *"First line: KNOWN_MISSING"*) answer "KNOWN_MISSING\\nI know the goal. I am missing the deadline." ;;
+    *"First line: KNOWN_MISSING"*) answer "KNOWN_MISSING\\nI know the goal. I am missing the deadline. cwd=$(basename "$PWD")" ;;
     *"fill the gaps"*) answer "ANSWER\\nThe deadline is Friday." ;;
     *"reached consensus"*) answer "FINAL: the agreed plan." ;;
     *"closes without consensus"*) answer "OVERVIEW: agreed nothing, disputed everything." ;;

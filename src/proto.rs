@@ -40,6 +40,9 @@ pub enum Msg {
         turn_budget: u32,
         #[serde(default)]
         token_budget: u64,
+        /// Normalized git remote of the project the room is about, if any.
+        #[serde(default)]
+        project: Option<String>,
         participants: Vec<Participant>,
     },
     #[serde(rename = "ROOM_JOIN")]

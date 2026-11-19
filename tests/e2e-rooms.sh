@@ -88,10 +88,24 @@ check "three peers reach consensus in 10 messages" 'grep -q "closed: consensus; 
 ROOM5="$(ls -t "$T/c/rooms" | head -1)"
 check "order is joiners, then opener" 'grep -q "#5 Heimserver · PROPOSAL" "$T/c/rooms/$ROOM5/log.md" && grep -q "#6 Laptop · PROPOSAL" "$T/c/rooms/$ROOM5/log.md" && grep -q "#7 Mac · PROPOSAL" "$T/c/rooms/$ROOM5/log.md"'
 
+# 6. The session works in the local clone of the room's project.
+mkdir -p "$T/repoA" "$T/repoB"
+git -C "$T/repoA" init -q && git -C "$T/repoA" remote add origin git@github.com:Example/Demo.git
+git -C "$T/repoB" init -q && git -C "$T/repoB" remote add origin https://github.com/example/demo
+b project add "$T/repoB" >/dev/null
+(cd "$T/repoA" && a discuss "Look at the code" --with Heimserver --turns 3 > "$T/out6" 2>&1)
+ROOM6="$(ls -t "$T/a/rooms" | head -1)"
+check "the joiner's session runs in its own clone of the project" 'grep -q "cwd=repoB" "$T/a/rooms/$ROOM6/log.md"'
+check "the opener's clone is registered by itself" 'a project list | grep -q "repoA.*github.com/example/demo"'
+(cd "$T" && a discuss "No repository here" --with Heimserver --turns 3 > "$T/out6b" 2>&1)
+ROOM6B="$(ls -t "$T/a/rooms" | head -1)"
+check "without a project the session runs in the room directory" 'grep -q "cwd=$ROOM6B" "$T/a/rooms/$ROOM6B/log.md"'
+check "agora stats lists the rooms on both sides" 'a stats | grep -q "^$ROOM6 *opened" && b stats | grep -q "^$ROOM6 *joined"'
+
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
 fi

@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
 
+use crate::project;
 use crate::proto::{self, ALPN, Member, Msg, Ticket};
 use crate::room::{self, Invite, RoomEvent, RoomHandle, RoomState};
 use crate::state::{NetStatus, Network, State, home};
@@ -356,9 +357,9 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             }
             Ok(still_member)
         }
-        Msg::RoomInvite { room_id, topic, turn_budget, participants, .. } => {
+        Msg::RoomInvite { room_id, topic, turn_budget, participants, project, .. } => {
             if is_live_member(shared, peer, tx) {
-                on_invite(shared, peer, room_id, topic, turn_budget, participants);
+                on_invite(shared, peer, room_id, topic, turn_budget, participants, project);
             }
             Ok(true)
         }
@@ -400,12 +401,20 @@ fn member(shared: &Shared, id: &str) -> Option<Member> {
 
 /// A peer invites us into a room. Peers we gave level 2 or higher start a session
 /// at once; all others wait for `agora accept`.
-fn on_invite(shared: &Arc<Shared>, peer: &str, room_id: String, topic: String, turn_budget: u32, participants: Vec<proto::Participant>) {
+fn on_invite(
+    shared: &Arc<Shared>,
+    peer: &str,
+    room_id: String,
+    topic: String,
+    turn_budget: u32,
+    participants: Vec<proto::Participant>,
+    project: Option<String>,
+) {
     let Some(m) = member(shared, peer) else { return };
     if !room_id.chars().all(|c| c.is_ascii_alphanumeric()) || room_id.is_empty() || room_id.len() > 32 {
         return;
     }
-    let invite = Invite { room_id: room_id.clone(), topic, from: peer.to_string(), turn_budget, participants, rights: m.rights.clone() };
+    let invite = Invite { room_id: room_id.clone(), topic, from: peer.to_string(), turn_budget, participants, rights: m.rights.clone(), project };
     let busy = shared.rooms.lock().unwrap().len() >= MAX_ROOMS;
     if busy {
         shared.send_to(peer, Msg::RoomDecline { room_id, reason: format!("already in {MAX_ROOMS} rooms") });
@@ -608,6 +617,35 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             state.save()?;
             Ok(format!("\"{name}\" now has level {level} and rights {rights} on this machine."))
         }
+        "project" => {
+            let action = arg("action")?;
+            if action == "list" {
+                let state = shared.state.lock().unwrap();
+                if state.projects.is_empty() {
+                    return Ok("no projects registered".into());
+                }
+                return Ok(state.projects.iter().map(|p| match project::locate(std::path::Path::new(p)) {
+                    Some((url, _)) => format!("{p}  ({url})"),
+                    None => format!("{p}  (no longer a git repository with an origin)"),
+                }).collect::<Vec<_>>().join("\n"));
+            }
+            let path = arg("path")?;
+            match action.as_str() {
+                "add" => {
+                    let (url, dir) = project::locate(std::path::Path::new(&path)).ok_or_else(|| anyhow!("{path} is not a git repository with an origin remote"))?;
+                    remember_project(shared, &dir.to_string_lossy())?;
+                    Ok(format!("Registered {} for project {url}.", dir.display()))
+                }
+                "remove" => {
+                    let mut state = shared.state.lock().unwrap();
+                    let before = state.projects.len();
+                    state.projects.retain(|p| *p != path && *p != path.trim_end_matches('/'));
+                    state.save()?;
+                    Ok(if state.projects.len() < before { format!("Removed {path}.") } else { format!("{path} was not registered.") })
+                }
+                other => bail!("unknown project action: {other}"),
+            }
+        }
         "rooms" => Ok(rooms(shared)),
         "accept" => {
             let id = arg("room")?;
@@ -728,6 +766,21 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     if shared.rooms.lock().unwrap().len() >= MAX_ROOMS {
         bail!("already in {MAX_ROOMS} rooms");
     }
+    // The project is the git repository the command was called in, unless told otherwise.
+    let wanted = req.args.get("project").cloned().unwrap_or_default();
+    let project = if wanted == "none" {
+        None
+    } else {
+        let start = if wanted.is_empty() { req.args.get("cwd").cloned().unwrap_or_default() } else { wanted.clone() };
+        let found = project::locate(std::path::Path::new(&start));
+        if found.is_none() && !wanted.is_empty() {
+            bail!("{wanted} is not a git repository with an origin remote");
+        }
+        found
+    };
+    if let Some((_, dir)) = &project {
+        remember_project(shared, &dir.to_string_lossy())?;
+    }
     let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
     let (tx, rx) = mpsc::channel(64);
     let (state_tx, state_rx) = watch::channel(RoomState::Running);
@@ -736,11 +789,20 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     // The room outlives this request: it may pause for a human and go on later.
     let (sh, rid) = (shared.clone(), id.clone());
     tokio::spawn(async move {
-        let result = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, rx, state_tx.clone()).await;
+        let result = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, project, rx, state_tx.clone()).await;
         let _ = state_tx.send(RoomState::Closed(result.map_err(|e| e.to_string())));
         sh.rooms.lock().unwrap().remove(&rid);
     });
     wait_room(&id, state_rx).await
+}
+
+fn remember_project(shared: &Shared, dir: &str) -> Result<()> {
+    let mut state = shared.state.lock().unwrap();
+    if !state.projects.iter().any(|p| p == dir) {
+        state.projects.push(dir.to_string());
+        state.save()?;
+    }
+    Ok(())
 }
 
 fn rooms(shared: &Shared) -> String {

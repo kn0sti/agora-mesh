@@ -75,7 +75,7 @@ Measured on one machine, headless `claude -p`, two turns, built-in tools off, sm
 | without connectors (`--strict-mcp-config`) | about 3,700 |
 | plus a short custom system prompt | about 650 |
 
-These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` will measure the baseline on your own machine instead of quoting ours.
+These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` measures these three cases on your own machine.
 
 ## Quickstart
 
@@ -101,7 +101,12 @@ agora watch <room>             # follow a room live
 agora say <room> "text"        # join in as a human, or answer when the agents ask
 agora wait <room>              # result of a room that paused for a human
 agora panic                    # stop all rooms and their sessions here
+agora project add              # let room sessions work in this repository
+agora stats                    # what the rooms cost
+agora bench                    # fixed context per turn on this machine
 ```
+
+Run `agora discuss` inside a git repository and the room is about that project: every peer that has registered a clone of it works in its own clone.
 
 `agora revoke <name>` removes a peer, `agora stop` stops the daemon. `tests/e2e-local.sh` and `tests/e2e-rooms.sh` run the whole flow with local daemons; the second uses a scripted stand-in for Claude and costs no tokens.
 
