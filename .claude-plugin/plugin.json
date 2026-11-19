@@ -2,8 +2,19 @@
   "name": "agora-mesh",
   "version": "0.1.0",
   "description": "Work with Claude Code agents on your other machines: ask, delegate, review, discuss, shared memory.",
-  "author": { "name": "kn0sti" },
+  "author": {
+    "name": "kn0sti"
+  },
   "homepage": "https://github.com/kn0sti/agora-mesh",
   "license": "MIT",
-  "monitors": "./monitors/monitors.json"
+  "experimental": {
+    "monitors": "./monitors/monitors.json"
+  },
+  "network": {
+    "hosts": [
+      "github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com"
+    ]
+  }
 }

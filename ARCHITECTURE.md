@@ -241,7 +241,7 @@ They use the invitation of a room with `mode` set to `ask` or `task`, so the sam
 
 `agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
 
-`plugin/skills/agora/SKILL.md` tells a Claude Code session when to use which command, to offer a peer's help on large tasks instead of imposing it, and what only the user decides.
+`skills/agora/SKILL.md` tells a Claude Code session when to use which command, to offer a peer's help on large tasks instead of imposing it, and what only the user decides.
 
 ## 13. Rooms that change while they run
 

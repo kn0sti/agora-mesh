@@ -1,6 +1,6 @@
 # agora-mesh
 
-> **Status: early development.** Stages 1 to 4 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room, split the work, do it in parallel, hand back a result and keep a shared memory. The plugin and prebuilt binaries are not built yet. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
+> **Status: early development.** Stages 1 to 4 and most of stage 5 of the [roadmap](#roadmap) work: machines form a network with human approval, stay connected, and their agents can discuss a topic in a room, split the work, do it in parallel, hand back a result and keep a shared memory. The plugin wrapper and the release workflows exist, but no release has been published yet, so for now you build from source. [ARCHITECTURE.md](ARCHITECTURE.md) is the specification.
 
 A symmetric peer-to-peer mesh for Claude Code. It connects the Claude Code CLI on two or more machines so that the agents on them can talk as equals: plan together, criticise each other's ideas, split large tasks, review each other's code and keep a shared memory.
 
@@ -77,21 +77,27 @@ Measured on one machine, headless `claude -p`, two turns, built-in tools off, sm
 
 These numbers apply to headless sessions. Interactive sessions load connector tools on demand, so they are not comparable. A room session with the built-in tools enabled measured about 25,500 input tokens per turn in an empty directory, and 42,000 to 53,000 where it loads the machine's own `CLAUDE.md` and memory. `agora bench` measures these three cases on your own machine.
 
-## A measured room
+## Measured
 
-One task, once: design how a room can resume after a daemon restart. Three Claude Sonnet sessions on two machines, the third joining while the room ran, against one Sonnet session alone. Details and method: [docs/measurements](docs/measurements/2026-11-room-with-three-sessions.md).
+**Two agents build a stage of this project.** The task was stage 5 of the roadmap below: release workflows and the plugin wrapper. Two Claude Sonnet agents on two machines got it as one paragraph. [Details and method](docs/measurements/2026-11-split-work.md).
 
-| | One agent alone | Room with three sessions |
-|---|---|---|
-| Wall time | 34 s | 104 s |
-| Tokens in total | 179,409 | 711,673 |
-| Outcome | a design | consensus on a design after 10 messages |
+| Seconds | |
+|---|---|
+| 0 to 49 | briefing, discussion, agreement on the interface between the parts, the split |
+| 49 to 100 | both work at the same time, each in its own clone on its own branch |
+| 108 | summary; two pushed branches, 11 files, no overlap, merged without a conflict |
 
-A room is not cheaper than one agent: here it took 3 times as long and 4 times the tokens. What it buys is agents that check each other, knowledge that lives on different machines, and usage that is spread over several accounts. Whether the result was better was not measured. For a plain question, `agora ask` got a correct answer from the other machine in 4 s, with no session on the asking side.
+The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
+
+**A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). A room pays off when the work is large enough to split, when the knowledge sits on different machines, or when several accounts share the load. For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
 
 ## Quickstart
 
-The one-sentence installation through Claude Code ([INSTALL.md](INSTALL.md)) comes with stage 5. Until then, build from source with a stable Rust toolchain:
+Once the first release is published, tell your Claude Code
+
+> Install https://github.com/kn0sti/agora-mesh and help me set it up.
+
+or install the plugin yourself with `/plugin install agora-mesh --marketplace kn0sti/agora-mesh`; [INSTALL.md](INSTALL.md) has the steps. Until then, build from source with a stable Rust toolchain:
 
 ```
 cargo build --release          # binary: target/release/agora

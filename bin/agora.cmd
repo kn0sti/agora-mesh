@@ -4,8 +4,8 @@ setlocal
 if defined AGORA_BIN if exist "%AGORA_BIN%" ( "%AGORA_BIN%" %* & exit /b %errorlevel% )
 set "ROOT=%CLAUDE_PLUGIN_ROOT%"
 if not defined ROOT set "ROOT=%~dp0.."
-set "DATA=%CLAUDE_PLUGIN_DATA%"
-if not defined DATA set "DATA=%LOCALAPPDATA%\agora-mesh-plugin"
+set "DATA=%AGORA_HOME%"
+if not defined DATA set "DATA=%USERPROFILE%\.agora"
 set "VERSION="
 for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "(Get-Content -Raw '%ROOT%\.claude-plugin\plugin.json' | ConvertFrom-Json).version"`) do set "VERSION=%%v"
 if not defined VERSION ( echo agora: cannot read version from plugin.json 1>&2 & exit /b 1 )

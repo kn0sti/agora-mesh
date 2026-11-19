@@ -6,7 +6,9 @@ set -eu
 if [ -n "${AGORA_BIN:-}" ] && [ -x "$AGORA_BIN" ]; then exec "$AGORA_BIN" "$@"; fi
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-data="${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/agora-mesh-plugin}"
+# Next to the daemon's own data, so that the Bash tool, hooks and monitors all
+# find the same copy (only the latter two are given CLAUDE_PLUGIN_DATA).
+data="${AGORA_HOME:-$HOME/.agora}"
 version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
 [ -n "$version" ] || { echo "agora: cannot read version from plugin.json" >&2; exit 1; }
 base="${AGORA_RELEASE_BASE:-https://github.com/kn0sti/agora-mesh/releases/download}/v$version"
