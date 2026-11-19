@@ -548,21 +548,17 @@ and where relevant information can be found. This one message needs no kind on t
         let mut order: Vec<Participant> = self.joiners.clone();
         order.push(self.me.clone());
         let mut last_kind: HashMap<String, String> = HashMap::new();
-        let mut idx = 0;
         let mut previous: Option<String> = None;
         let reason = loop {
             // Peers that joined late speak before the opener from now on.
             for p in std::mem::take(&mut self.arrivals) {
                 order.insert(order.len() - 1, p);
             }
-            if order.iter().all(|p| self.budget[&p.id] == 0) {
+            // Whoever comes after the last speaker and still has turns. Going by
+            // the last speaker keeps the order right when a peer joins in between.
+            let Some(speaker) = self.speaker_after(&order, previous.as_deref()) else {
                 break "turn budget used up";
-            }
-            let speaker = order[idx % order.len()].clone();
-            idx += 1;
-            if self.budget[&speaker.id] == 0 {
-                continue;
-            }
+            };
             // Only one peer has turns left: it would be talking to itself.
             if previous.as_deref() == Some(speaker.id.as_str()) {
                 break "turn budget used up";
@@ -606,7 +602,7 @@ and where relevant information can be found. This one message needs no kind on t
                 "PROPOSAL" => self.split = None,
                 _ => {}
             }
-            let next = self.next_speaker(&order, idx);
+            let next = self.speaker_after(&order, Some(&speaker.id)).map(|p| p.id).filter(|id| *id != speaker.id);
             last_kind.insert(speaker.id.clone(), kind.clone());
             let active: Vec<&Participant> = order.iter().filter(|p| !self.limited.contains(&p.id)).collect();
             let mut done = if kind == "NEED_HUMAN" {
@@ -626,7 +622,7 @@ and where relevant information can be found. This one message needs no kind on t
             self.publish(&speaker, &kind, &text, if done.is_some() { None } else { next });
             // NEED_HUMAN pauses the room. It goes on when a human answers and
             // closes with an overview when nobody does.
-            if kind == "NEED_HUMAN" && self.wait_human(&speaker, &text, &order, idx).await? {
+            if kind == "NEED_HUMAN" && self.wait_human(&speaker, &text, &order).await? {
                 continue;
             }
             if let Some(reason) = done {
@@ -871,9 +867,10 @@ and where relevant information can be found. This one message needs no kind on t
         self.session.tokens() + self.work_session.as_ref().map_or(0, |s| s.tokens()) + self.joiner_tokens.values().sum::<u64>()
     }
 
-    /// The first peer from position `idx` on that still has turns.
-    fn next_speaker(&self, order: &[Participant], idx: usize) -> Option<String> {
-        (0..order.len()).map(|k| &order[(idx + k) % order.len()]).find(|p| self.budget[&p.id] > 0).map(|p| p.id.clone())
+    /// The first peer after `after` in the speaking order that still has turns.
+    fn speaker_after(&self, order: &[Participant], after: Option<&str>) -> Option<Participant> {
+        let start = after.and_then(|a| order.iter().position(|p| p.id == a)).map_or(0, |i| i + 1);
+        (0..order.len()).map(|k| &order[(start + k) % order.len()]).find(|p| self.budget[&p.id] > 0).cloned()
     }
 
     fn grant(&mut self, turns: u32) {
@@ -883,7 +880,7 @@ and where relevant information can be found. This one message needs no kind on t
     }
 
     /// Waits for a human after NEED_HUMAN. True if one answered and the room goes on.
-    async fn wait_human(&mut self, asker: &Participant, question: &str, order: &[Participant], idx: usize) -> Result<bool> {
+    async fn wait_human(&mut self, asker: &Participant, question: &str, order: &[Participant]) -> Result<bool> {
         let _ = self.state.send(RoomState::Paused(format!("{} asks: {question}", asker.name)));
         crate::daemon::event("room-paused", &format!("{}: {} asks a human (agora say {} \"<answer>\")", self.room_id, asker.name, self.room_id));
         loop {
@@ -909,7 +906,7 @@ and where relevant information can be found. This one message needs no kind on t
                 None => bail!("room stopped"),
             };
             self.grant(extra);
-            let next = self.next_speaker(order, idx);
+            let next = self.speaker_after(order, Some(&asker.id)).map(|p| p.id);
             self.publish(&who, "HUMAN", &text, next);
             let _ = self.state.send(RoomState::Running);
             return Ok(true);
