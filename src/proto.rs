@@ -68,6 +68,9 @@ pub enum Msg {
     /// Opener to joiner: work on this package now.
     #[serde(rename = "WORK")]
     Work { room_id: String, package: u32, title: String, branch: String, taken_from: Option<String> },
+    /// A new version of a shared-memory entry.
+    #[serde(rename = "MEM_PUT")]
+    MemPut { entry: crate::memory::MemEntry },
     /// How much of its usage limit a peer has used.
     #[serde(rename = "STATUS")]
     Status { capacity: Capacity },

@@ -131,6 +131,11 @@ fn is_limit_error(v: &serde_json::Value, text: &str) -> bool {
     v["api_error_status"].as_u64() == Some(429) || ["usage limit", "rate limit", "limit reached", "hit your limit"].iter().any(|p| t.contains(p))
 }
 
+/// One line per high-importance memory entry the session has not been told about.
+fn memory_notes(shared: &Shared, seen: &mut usize) -> String {
+    shared.notices_since(seen).iter().map(|n| format!("[shared memory, new] {n}\n")).collect()
+}
+
 /// What a session is told when it starts a work package.
 fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>, has_repo: bool) -> String {
     let takeover = match taken_from {
@@ -155,6 +160,14 @@ Reply with the first line DONE or BLOCKED, then at most five lines: what you did
 fn claude_command() -> Command {
     let mut cmd = Command::new(std::env::var("AGORA_CLAUDE").unwrap_or_else(|_| "claude".into()));
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
+    // Let the session call `agora` itself, for the shared memory.
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        let mut parts = vec![dir];
+        parts.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        if let Ok(path) = std::env::join_paths(parts) {
+            cmd.env("PATH", path);
+        }
+    }
     cmd
 }
 
@@ -170,6 +183,8 @@ Send CONSENSUS only when you accept the latest proposal as it stands. Send NEED_
 Send PASS when you have nothing to add. \
 To divide work, send SPLIT_WORK with one line per package in the form `- <peer name>: <package>`; \
 once every peer answers CONSENSUS, all peers work on their packages at the same time. \
+The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
+`agora remember \"<text>\" --title \"<title>\" --importance high|normal|low` saves a fact every peer should keep. \
 A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
         );
         let mut cmd = claude_command();
@@ -332,6 +347,8 @@ struct Opener {
     /// Packages of the latest SPLIT_WORK proposal: owner id and title.
     split: Option<Vec<(String, String)>>,
     has_project: bool,
+    /// How many shared-memory notices our session has been told about.
+    notice_idx: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -384,7 +401,8 @@ pub async fn run_opener(
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
     let session = Session::start(&work_dir, &me.name, &others, "full")?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
-    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state, limited: HashSet::new(), split: None, has_project: project.is_some() };
+    let notice_idx = shared.notices_len();
+    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state, limited: HashSet::new(), split: None, has_project: project.is_some(), notice_idx };
 
     let brief_topic = match &project {
         Some((url, d)) => format!("{topic}\nProject: {url}. You are in its local clone at {}.", d.display()),
@@ -684,6 +702,7 @@ and where relevant information can be found. This one message needs no kind on t
     /// Waits for a human after NEED_HUMAN. True if one answered and the room goes on.
     async fn wait_human(&mut self, asker: &Participant, question: &str, order: &[Participant], idx: usize) -> Result<bool> {
         let _ = self.state.send(RoomState::Paused(format!("{} asks: {question}", asker.name)));
+        crate::daemon::event("room-paused", &format!("{}: {} asks a human (agora say {} \"<answer>\")", self.room_id, asker.name, self.room_id));
         loop {
             let ev = match tokio::time::timeout(PAUSE_TIMEOUT, self.rx.recv()).await {
                 Ok(ev) => ev,
@@ -761,8 +780,9 @@ and where relevant information can be found. This one message needs no kind on t
     /// Takes a turn with our own session: new messages since its last turn, then `ask`.
     async fn own_turn(&mut self, ask: &str) -> Result<String> {
         self.drain()?;
-        let news: String = self.log[self.seen..].iter().filter(|e| e.from != self.me.id || e.kind == "HUMAN").map(render).collect::<Vec<_>>().join("\n");
+        let mut news: String = self.log[self.seen..].iter().filter(|e| e.from != self.me.id || e.kind == "HUMAN").map(render).collect::<Vec<_>>().join("\n");
         self.seen = self.log.len();
+        news = format!("{}{news}", memory_notes(&self.shared, &mut self.notice_idx));
         let reply = self.session.turn(&format!("{news}\n{ask}")).await;
         if let Some(c) = self.session.capacity {
             self.shared.report_capacity(c);
@@ -854,6 +874,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     shared.send_to(&invite.from, Msg::RoomJoin { room_id: invite.room_id.clone() });
 
     let mut news: Vec<Entry> = vec![];
+    let mut notice_idx = shared.notices_len();
     let mut my_left = invite.turn_budget;
     let outcome: Result<String> = loop {
         match rx.recv().await {
@@ -874,7 +895,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
                 } else {
                     format!("Your turn ({my_left} turns left).")
                 };
-                let prompt = format!("{}\n{ask}", news.iter().map(render).collect::<Vec<_>>().join("\n"));
+                let prompt = format!("{}{}\n{ask}", memory_notes(&shared, &mut notice_idx), news.iter().map(render).collect::<Vec<_>>().join("\n"));
                 news.clear();
                 let turn = session.turn(&prompt).await;
                 if let Some(c) = session.capacity {

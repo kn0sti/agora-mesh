@@ -34,6 +34,12 @@ pub struct State {
     /// Local clones a room session may be started in, see project.rs.
     #[serde(default)]
     pub projects: Vec<String>,
+    /// Terms that must never be written to the shared memory from this machine.
+    #[serde(default)]
+    pub blocklist: Vec<String>,
+    /// Obsidian vault folder that mirrors the shared memory.
+    #[serde(default)]
+    pub obsidian: Option<String>,
 }
 
 /// Data directory. `AGORA_HOME` overrides it, which lets two daemons run on one machine.

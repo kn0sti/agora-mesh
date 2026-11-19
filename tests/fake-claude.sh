@@ -6,9 +6,12 @@
 #   FAKE_SPLIT=1     proposes a split of the work on its first turn
 #   FAKE_LIMIT=1     fails with a usage-limit error when asked to work on a package
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
+#   FAKE_DELAY       seconds to wait before every answer
 n=0
 human=0
+memory=""
 answer() {
+  [ -n "${FAKE_DELAY:-}" ] && sleep "$FAKE_DELAY"
   printf '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":4102444800,"unifiedWindows":{"five_hour":{"utilization":%s,"resetsAt":4102444800,"status":"allowed"}}}}\n' "${FAKE_UTIL:-0.42}"
   printf '{"type":"result","is_error":false,"result":"%s","usage":{"input_tokens":100,"output_tokens":10}}\n' "$1"
 }
@@ -17,6 +20,8 @@ limit() {
 }
 while IFS= read -r line; do
   case "$line" in *"· HUMAN]"*) human=1 ;; esac
+  # Says so once it has been told about a new shared-memory entry.
+  case "$line" in *"[shared memory, new]"*) memory=" saw-memory-notice" ;; esac
   case "$line" in
     *"The work phase is over"*) answer "WORKRESULT: all packages are reported." ;;
     *"Work phase. Package #"*)
@@ -30,7 +35,7 @@ while IFS= read -r line; do
     *"closes without consensus"*) answer "OVERVIEW: agreed nothing, disputed everything." ;;
     *"Your turn"*)
       n=$((n + 1))
-      if [ "${FAKE_STUBBORN:-0}" = 1 ]; then answer "CRITIQUE\\nStill not convinced ($n)."
+      if [ "${FAKE_STUBBORN:-0}" = 1 ]; then answer "CRITIQUE\\nStill not convinced ($n).$memory"
       elif [ "$human" = 1 ]; then answer "CONSENSUS\\nAgreed with the human's answer."
       elif [ "${FAKE_ASK:-0}" = 1 ] && [ "$n" = 1 ]; then answer "NEED_HUMAN\\nWhich database should we use?"
       elif [ "${FAKE_SPLIT:-0}" = 1 ] && [ "$n" = 1 ]; then answer "SPLIT_WORK\\n- Mac: backend\\n- Heimserver: frontend"

@@ -177,15 +177,37 @@ The token budget applies to the discussion only; work-phase tokens are counted i
 
 ## 9. Shared memory
 
-- One directory per network, in the same format as Claude's memory (one fact per file, plus an index). A peer's private memory is never overwritten.
-- Each peer keeps a signed append-only log of its changes. Peers merge by union; when two change the same entry, the later logical clock wins and the older version is kept.
-- A session writes with `agora remember "<text>" --importance high|normal|low`.
-  - `high`: running sessions of all peers receive one line with the title at once; the content is fetched on demand.
-  - `normal`: appears in the index, visible at the next session or room start.
-  - `low`: archive only.
-- Adapters mirror the shared directory into an Obsidian vault folder and add a single pointer line to the Claude memory index.
+Every network has one shared memory, replicated to all its peers. It lives under `~/.agora/shared/<network>/`:
 
-**Open (stage 4):** own replication as described, or iroh's document sync.
+| Path | Content |
+|---|---|
+| `<id>.md` | one entry per file, with title, importance, author and clock in the front matter |
+| `INDEX.md` | one line per entry of importance high or normal |
+| `archive/<id>.md` | entries of importance low |
+| `history/<id>.<clock>.md` | older versions of changed entries |
+| `entries.json` | what the daemon replicates |
+
+A peer's private Claude memory is never read or written.
+
+**Writing.** `agora remember "<text>" --title "<title>" --importance high|normal|low`. The id is derived from the title, so writing the same title again replaces the entry. Room sessions have `agora` on their path and are told about these commands, so agents can read and write the memory themselves.
+
+| Importance | Effect |
+|---|---|
+| `high` | every peer adds an event (`agora events`), and sessions running in rooms are told the title on their next turn; they fetch the text with `agora memory show <id>` only if they need it |
+| `normal` | listed in the index |
+| `low` | archive only |
+
+**Replication.** An entry carries a logical clock and is signed by its author with the peer key. A peer accepts an entry when the sender and the author are members of the network, the signature is valid, and (clock, author) is higher than what it has; the replaced version goes to `history/`. Accepted entries are passed on to all other connected members, so they spread through the mesh. When a link comes up, both sides send all their entries, which is how a peer that was offline or has just joined catches up. Deleting (`agora forget <id>`) replicates as a marker.
+
+**Room results.** When a room opened here closes with a result, the result is saved as `Room <id>: <topic>` with importance normal (`agora discuss --remember high|normal|low|none`). Room directories with log and result are removed 30 days after their last change.
+
+**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
+
+**Obsidian.** `agora obsidian <vault folder>` mirrors new and changed entries of importance high and normal to `<folder>/agora/<network>/`, one way.
+
+**Events.** The daemon appends join requests, invitations, paused and closed rooms and high-importance entries to `~/.agora/events.log`. `agora events` prints the last ones; `agora events --follow` prints each new one as a line, which is what the plugin's monitor will run to tell an interactive session.
+
+**Not built yet:** knowledge levels 2 and 3 (mirroring a peer's Claude memory or other sources), a pointer line in Claude's own memory index, and replication that sends only what the other side lacks. Sending everything on connect is fine for a few hundred short entries.
 
 ## 10. Measuring
 
@@ -198,6 +220,7 @@ The token budget applies to the discussion only; work-phase tokens are counted i
 | NAT traversal between two real home networks | 1 |
 | Behaviour at a real usage limit (only simulated so far) | 3 |
 | Work phase and takeover with real sessions and a real repository | 3 |
-| Replication of the shared memory | 4 |
+| Knowledge levels 2 and 3 (mirroring Claude memory, external sources) | 5 |
+| An agent writing to the shared memory on its own, with a real session | 4 |
 | Plugin monitor and Windows behaviour in practice | 5 |
 | Original wording of Anthropic's terms on several accounts | 6 |
