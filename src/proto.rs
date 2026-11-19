@@ -44,7 +44,25 @@ pub enum Msg {
         #[serde(default)]
         project: Option<String>,
         participants: Vec<Participant>,
+        /// "" for a room, "ask" for a single question.
+        #[serde(default)]
+        mode: String,
+        /// For a peer invited into a running room: what was said so far.
+        #[serde(default)]
+        catch_up: Option<String>,
+        /// Number of the last message before the invitation.
+        #[serde(default)]
+        seq: u32,
+        /// Discuss without tools; a second session with tools does the work.
+        #[serde(default)]
+        lean: bool,
     },
+    /// Joiner to opener: send the room's messages again from this number on.
+    #[serde(rename = "RESEND")]
+    Resend { room_id: String, from_seq: u32 },
+    /// Opener to joiner after a reconnect: do you still have this room?
+    #[serde(rename = "ROOM_PING")]
+    RoomPing { room_id: String },
     #[serde(rename = "ROOM_JOIN")]
     RoomJoin { room_id: String },
     #[serde(rename = "ROOM_DECLINE")]
@@ -64,6 +82,9 @@ pub enum Msg {
         /// Set when the contribution reports on a work package.
         #[serde(default)]
         package: Option<u32>,
+        /// Counts the joiner's contributions, so one sent twice is used once.
+        #[serde(default)]
+        n: u32,
     },
     /// Opener to joiner: work on this package now.
     #[serde(rename = "WORK")]
@@ -71,6 +92,9 @@ pub enum Msg {
     /// A new version of a shared-memory entry.
     #[serde(rename = "MEM_PUT")]
     MemPut { entry: crate::memory::MemEntry },
+    /// How many rooms, questions and tasks a peer is working on right now.
+    #[serde(rename = "BUSY")]
+    Busy { rooms: u32 },
     /// How much of its usage limit a peer has used.
     #[serde(rename = "STATUS")]
     Status { capacity: Capacity },
