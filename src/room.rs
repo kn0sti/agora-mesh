@@ -87,6 +87,7 @@ pub struct Invite {
     pub catch_up: Option<String>,
     pub seq: u32,
     pub lean: bool,
+    pub model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -147,6 +148,8 @@ struct Session {
     cancel: watch::Receiver<bool>,
     /// Set once the process was killed; its output can no longer be trusted.
     dead: bool,
+    /// The model the session says it runs on.
+    model: Option<String>,
     stdin: ChildStdin,
     lines: Lines<BufReader<ChildStdout>>,
     turns: u32,
@@ -232,7 +235,7 @@ fn claude_command() -> Command {
 }
 
 impl Session {
-    fn start(dir: &Path, me: &str, others: &str, rights: &str, cancel: watch::Receiver<bool>) -> Result<Session> {
+    fn start(dir: &Path, me: &str, others: &str, rights: &str, model: Option<&str>, cancel: watch::Receiver<bool>) -> Result<Session> {
         let rules = format!(
             "You are \"{me}\", one of several equal peers in an agora-mesh room. The other peers ({others}) are \
 Claude Code agents on other machines with their own files and knowledge; a human may read along. \
@@ -266,6 +269,10 @@ A room starts with a short briefing; during it you are told which first line to 
         if let Ok(extra) = std::env::var("AGORA_CLAUDE_ARGS") {
             cmd.args(extra.split_whitespace());
         }
+        // The room's model comes last, so it wins over a model named in the environment.
+        if let Some(model) = model.filter(|m| proto::valid_model(m)) {
+            cmd.args(["--model", model]);
+        }
         Self::spawn(cmd, dir, cancel)
     }
 
@@ -284,7 +291,7 @@ A room starts with a short briefing; during it you are told which first line to 
             .map_err(|e| anyhow!("could not start claude: {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        Ok(Session { child, cancel, dead: false, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT, busy: Duration::ZERO })
+        Ok(Session { child, cancel, dead: false, model: None, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT, busy: Duration::ZERO })
     }
 
     /// Sends one user message and waits for the turn's final answer. The turn
@@ -356,6 +363,12 @@ A room starts with a short briefing; during it you are told which first line to 
                 }
                 continue;
             }
+            if v["type"] == "system" && v["subtype"] == "init" {
+                if let Some(model) = v["model"].as_str() {
+                    self.model = Some(model.to_string());
+                }
+                continue;
+            }
             if v["type"] != "result" {
                 continue;
             }
@@ -405,7 +418,7 @@ fn write_stats(
     let mut v = serde_json::json!({
         "room": room_id, "topic": topic, "role": role, "reason": reason, "messages": messages, "closed_at": closed_at,
         "turns": session.turns, "tokens_in": session.tokens_in, "tokens_out": session.tokens_out,
-        "model_s": session.busy.as_secs(), "duration_s": took.as_secs(),
+        "model_s": session.busy.as_secs(), "duration_s": took.as_secs(), "model": session.model,
     });
     if let Some((total, peers)) = all {
         v["all_peers_tokens"] = total.into();
@@ -481,6 +494,7 @@ struct Opener {
     /// Work a joiner has been sent and not reported on yet.
     assigned: HashMap<String, Msg>,
     lean: bool,
+    model: Option<String>,
     /// In a lean room: the session with tools that does this machine's packages.
     work_session: Option<Session>,
     work_dir: PathBuf,
@@ -520,6 +534,7 @@ pub async fn run_opener(
     turns: u32,
     token_budget: u64,
     lean: bool,
+    model: Option<String>,
     project: Option<(String, PathBuf)>,
     rx: mpsc::Receiver<RoomEvent>,
     state: watch::Sender<RoomState>,
@@ -539,7 +554,7 @@ pub async fn run_opener(
     let mut participants = vec![me.clone()];
     participants.extend(joiners.iter().cloned());
     for j in &joiners {
-        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, token_budget, project: project.as_ref().map(|(url, _)| url.clone()), participants: participants.clone(), mode: String::new(), catch_up: None, seq: 0, lean };
+        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, token_budget, project: project.as_ref().map(|(url, _)| url.clone()), participants: participants.clone(), mode: String::new(), catch_up: None, seq: 0, lean, model: model.clone() };
         if !shared.send_to(&j.id, invite) {
             bail!("peer \"{}\" is offline", j.name);
         }
@@ -549,7 +564,7 @@ pub async fn run_opener(
     // The session works in the project's clone; log and result stay in the room directory.
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
     // A lean room discusses without tools; see `work_turn` for the work phase.
-    let session = Session::start(&work_dir, &me.name, &others, if lean { "talk" } else { "full" }, cancel.clone())?;
+    let session = Session::start(&work_dir, &me.name, &others, if lean { "talk" } else { "full" }, model.as_deref(), cancel.clone())?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
     let notice_idx = shared.notices_len();
     let mut room = Opener {
@@ -579,6 +594,7 @@ pub async fn run_opener(
         said: HashMap::new(),
         assigned: HashMap::new(),
         lean,
+        model,
         work_session: None,
         work_dir,
         others,
@@ -906,7 +922,7 @@ and where relevant information can be found. This one message needs no kind on t
             return self.own_turn(prompt).await;
         }
         if self.work_session.is_none() {
-            self.work_session = Some(Session::start(&self.work_dir, &self.me.name, &self.others, "full", self.cancel.clone())?);
+            self.work_session = Some(Session::start(&self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone())?);
         }
         let ws = self.work_session.as_mut().unwrap();
         ws.timeout = WORK_TIMEOUT;
@@ -1060,6 +1076,7 @@ and where relevant information can be found. This one message needs no kind on t
             catch_up: None,
             seq: 0,
             lean: self.lean,
+            model: self.model.clone(),
         }
     }
 
@@ -1188,6 +1205,7 @@ and where relevant information can be found. This one message needs no kind on t
                         catch_up: Some(self.catch_up()),
                         seq: self.log.len() as u32,
                         lean: self.lean,
+                        model: self.model.clone(),
                     };
                     if self.shared.send_to(&new.id, invite) {
                         self.invited.push(new);
@@ -1266,6 +1284,7 @@ pub async fn run_ask(
     peer: Member,
     project: Option<(String, PathBuf)>,
     mode: &str,
+    model: Option<String>,
     mut rx: mpsc::Receiver<RoomEvent>,
 ) -> Result<String> {
     let started = std::time::Instant::now();
@@ -1285,6 +1304,7 @@ pub async fn run_ask(
         catch_up: None,
         seq: 0,
         lean: false,
+        model,
     };
     if !shared.send_to(&other.id, invite) {
         bail!("peer \"{}\" is offline", other.name);
@@ -1348,7 +1368,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     let has_clone = clone.is_some();
     let work_dir = clone.unwrap_or_else(|| dir.clone());
     let discuss_rights = if invite.lean { "talk" } else { invite.rights.as_str() };
-    let mut session = match Session::start(&work_dir, &my_name, &others, discuss_rights, cancel.clone()) {
+    let mut session = match Session::start(&work_dir, &my_name, &others, discuss_rights, invite.model.as_deref(), cancel.clone()) {
         Ok(s) => s,
         Err(e) => {
             shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: e.to_string() });
@@ -1486,7 +1506,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
                 // In a lean room the discussion session has no tools; a second one does the work.
                 if invite.lean && work_session.is_none() {
-                    work_session = Session::start(&work_dir, &my_name, &others, &invite.rights, cancel.clone()).ok();
+                    work_session = Session::start(&work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()).ok();
                 }
                 // A peer that joined late and has not spoken yet still needs to know what was said.
                 let before = catch_up.take().map(|c| format!("You joined this room while it was running. What was said before you joined:\n{c}\n\n")).unwrap_or_default();

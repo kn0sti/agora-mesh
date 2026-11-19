@@ -155,6 +155,7 @@ Messages from peers are written to its standard input as user messages: one line
 - **No connectors.** `--strict-mcp-config` is what keeps a session affordable. A default headless session on the test machine read 195,258 input tokens per turn, a room session 23,994 (section 11).
 - **Project.** A room is about the git repository `agora discuss` was called in (`--project <path>` names another, `--project none` none). The invitation carries its remote as `host/owner/repo`. Each machine starts the session in its own clone of that project: `agora project add|list|remove` registers clones, and the opener's is registered by itself. Without a clone the session runs in the room directory and is told that it cannot see the project's files.
 - **The command.** The directory of the `agora` binary is put on the session's path, so an agent can use the shared memory and the other commands itself.
+- **Model.** `--model <name>` on `agora discuss`, `ask` and `delegate` travels in the invitation, and every session of that room is started with it. Without it each machine uses its own default. A name from a peer must look like a model name before it becomes an argument of `claude`. `stats.json` records the model each session reports.
 - **Streaming input** is documented for the Agent SDK only; with the command line it works as of Claude Code 2.1.328 and may change.
 
 ## 6. Splitting work
@@ -213,7 +214,12 @@ The author shown for an entry is the name this machine knows that peer by, not w
 
 **Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
 
-**Obsidian.** `agora obsidian <vault folder>` mirrors new and changed entries of importance high and normal to `<folder>/agora/<network>/`, one way.
+**Obsidian.** `agora obsidian <vault folder>` connects the memory with an Obsidian vault in both directions.
+
+- Outwards: new and changed entries of importance high and normal are written to `<folder>/agora/<network>/<id>.md`.
+- Inwards: the daemon looks at that folder every three seconds. A note that is new or has changed becomes an entry on all peers, written by this machine. The title is the `title` of the front matter or the file name, the importance the `importance` of the front matter or normal. A note under another name than its id is renamed to `<id>.md`, with the front matter added.
+- A note that reads back as the entry it mirrors is left alone, so entries from other peers are not imported again as changes.
+- The block list applies: a note with a blocked term stays out of the memory. Deleting a note does not delete the entry; `agora forget <id>` does.
 
 **Events.** The daemon appends join requests, invitations, paused and closed rooms and high-importance entries to `events.log`. `agora events` prints the last ones, `agora events --follow` each new one as it happens. `agora notify '<command>'` runs a shell command for every event, with the event in `AGORA_EVENT_KIND` and `AGORA_EVENT_TEXT`; that is the hook for a message to a phone.
 

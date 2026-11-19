@@ -269,6 +269,63 @@ fn remember(shared: &Shared, network: &str, id: Option<&str>, title: &str, body:
     Ok(entry)
 }
 
+/// Notes a human writes or changes in the Obsidian folder become entries of the
+/// shared memory, so the vault works in both directions. The folder is looked
+/// at every few seconds; a file is read again only when it has changed.
+async fn obsidian_loop(shared: Arc<Shared>) {
+    let mut seen: HashMap<std::path::PathBuf, std::time::SystemTime> = HashMap::new();
+    loop {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (mirror, networks) = {
+            let state = shared.state.lock().unwrap();
+            let active: Vec<String> = state.networks.iter().filter(|n| n.status == NetStatus::Active).map(|n| n.id.clone()).collect();
+            (state.obsidian.clone(), active)
+        };
+        let Some(mirror) = mirror else {
+            seen.clear();
+            continue;
+        };
+        for network in networks {
+            let Ok(files) = std::fs::read_dir(memory::mirror_dir(&mirror, &network)) else { continue };
+            let entries = memory::load(&network);
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Ok(modified) = file.metadata().and_then(|m| m.modified()) else { continue };
+                // Unchanged since we last looked, or still being written.
+                if seen.get(&path) == Some(&modified) || modified.elapsed().is_ok_and(|age| age < Duration::from_secs(2)) {
+                    continue;
+                }
+                seen.insert(path.clone(), modified);
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let note = memory::parse_note(&text, &stem);
+                if note.body.is_empty() {
+                    continue;
+                }
+                let id = memory::slug(&stem);
+                // The files this daemon mirrors itself read back as their entry: nothing to do.
+                let same = entries.get(&id).is_some_and(|e| !e.deleted && e.title.trim() == note.title && e.importance == note.importance && e.body.trim() == note.body);
+                if same {
+                    continue;
+                }
+                match remember(&shared, &network, Some(&id), &note.title, &note.body, &note.importance, false) {
+                    Ok(e) => {
+                        eprintln!("obsidian: \"{}\" is now entry {} of the shared memory", e.title, e.id);
+                        // The entry is mirrored back as <id>.md; a note under another name would be a second copy.
+                        if path.file_name().and_then(|n| n.to_str()) != Some(format!("{}.md", e.id).as_str()) {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                    Err(e) => eprintln!("obsidian: {} was not taken into the shared memory: {e}", path.display()),
+                }
+            }
+        }
+    }
+}
+
 pub fn secret_key_from_hex(hex: &str) -> Result<SecretKey> {
     let bytes = data_encoding::HEXLOWER.decode(hex.as_bytes()).map_err(|_| anyhow!("secret key in state.json is damaged"))?;
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("secret key has the wrong length"))?;
@@ -312,6 +369,7 @@ pub async fn run() -> Result<()> {
     prune_rooms();
 
     tokio::spawn(accept_loop(shared.clone()));
+    tokio::spawn(obsidian_loop(shared.clone()));
     tokio::spawn(dial_loop(shared.clone()));
 
     loop {
@@ -593,9 +651,9 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::UnboundedSe
             }
             Ok(true)
         }
-        Msg::RoomInvite { room_id, topic, turn_budget, participants, project, mode, catch_up, seq, lean, .. } => {
+        Msg::RoomInvite { room_id, topic, turn_budget, participants, project, mode, catch_up, seq, lean, model, .. } => {
             if is_live_member(shared, peer, tx) {
-                let invite = Invite { room_id, topic, from: peer.to_string(), turn_budget, participants, rights: String::new(), project, mode, catch_up, seq, lean };
+                let invite = Invite { room_id, topic, from: peer.to_string(), turn_budget, participants, rights: String::new(), project, mode, catch_up, seq, lean, model: model.filter(|m| proto::valid_model(m)) };
                 on_invite(shared, peer, invite);
             }
             Ok(true)
@@ -1054,7 +1112,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             }
             state.obsidian = Some(path.clone());
             state.save()?;
-            Ok(format!("New and changed entries are mirrored to {path}/agora/<network>/."))
+            Ok(format!("Entries are mirrored to {path}/agora/<network>/, and notes you write or change there become entries on all peers."))
         }
         "project" => {
             let action = arg("action")?;
@@ -1155,7 +1213,7 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
             let (cancel, _) = watch::channel(false);
             shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: question.clone(), role, tx, state: None, cancel, from: None });
             shared.announce_rooms();
-            let result = room::run_ask(shared.clone(), id.clone(), question, peer, project, mode, rx).await;
+            let result = room::run_ask(shared.clone(), id.clone(), question, peer, project, mode, model_of(req)?, rx).await;
             shared.rooms.lock().unwrap().remove(&id);
             shared.announce_rooms();
             result
@@ -1225,6 +1283,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         bail!("turns must be between 1 and 30");
     }
     let lean = req.args.get("lean").is_some_and(|v| v == "1");
+    let model = model_of(req)?;
     let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
@@ -1274,7 +1333,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let note_topic = topic.clone();
     tokio::spawn(async move {
         // In a task of its own, so that the room is removed even if it panics.
-        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, project, rx, state_tx.clone(), cancelled);
+        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, project, rx, state_tx.clone(), cancelled);
         let result = tokio::spawn(run).await.unwrap_or_else(|e| Err(anyhow!("the room crashed: {e}")));
         if let Ok(text) = &result {
             event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
@@ -1291,6 +1350,15 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         sh.announce_rooms();
     });
     wait_room(&id, state_rx).await
+}
+
+/// The model a command names for the sessions it starts, if any.
+fn model_of(req: &Request) -> Result<Option<String>> {
+    match req.args.get("model").filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some(m) if proto::valid_model(m) => Ok(Some(m.clone())),
+        Some(m) => bail!("\"{m}\" does not look like a model name"),
+    }
 }
 
 /// The project a command is about: the git repository it was called in, unless

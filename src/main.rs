@@ -93,6 +93,9 @@ enum Cmd {
         /// Discuss without tools to save tokens; a second session with tools does the work
         #[arg(long)]
         lean: bool,
+        /// Model for every session of the room, for example fable; default: each machine's own
+        #[arg(long, default_value = "")]
+        model: String,
     },
     /// Invite another peer into a running room you opened
     Invite { room: String, name: String },
@@ -102,6 +105,9 @@ enum Cmd {
         /// Peer name; default: the only peer that is online
         #[arg(long, default_value = "")]
         with: String,
+        /// Model the peer's session should use; default: its own
+        #[arg(long, default_value = "")]
+        model: String,
         /// Git repository the question is about; default: the one you are in. "none" for no project
         #[arg(long, default_value = "")]
         project: String,
@@ -112,6 +118,9 @@ enum Cmd {
         /// Peer name; default: the only peer that is online
         #[arg(long, default_value = "")]
         with: String,
+        /// Model the peer's session should use; default: its own
+        #[arg(long, default_value = "")]
+        model: String,
         /// Git repository the task is about; default: the one you are in. "none" for no project
         #[arg(long, default_value = "")]
         project: String,
@@ -236,7 +245,7 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean } => call(
+        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean, model } => call(
             "discuss",
             &[
                 ("topic", topic),
@@ -246,12 +255,13 @@ fn main() -> Result<()> {
                 ("project", project),
                 ("remember", remember),
                 ("lean", if lean { "1".into() } else { String::new() }),
+                ("model", model),
                 ("cwd", cwd()),
             ],
         ),
         Cmd::Invite { room, name } => call("invite", &[("room", room), ("name", name)]),
-        Cmd::Ask { question, with, project } => call("ask", &[("question", question), ("with", with), ("project", project), ("cwd", cwd())]),
-        Cmd::Delegate { task, with, project } => call("delegate", &[("question", task), ("with", with), ("project", project), ("cwd", cwd())]),
+        Cmd::Ask { question, with, model, project } => call("ask", &[("question", question), ("with", with), ("model", model), ("project", project), ("cwd", cwd())]),
+        Cmd::Delegate { task, with, model, project } => call("delegate", &[("question", task), ("with", with), ("model", model), ("project", project), ("cwd", cwd())]),
         Cmd::Peers => call("peers", &[]),
         Cmd::Review { with, base } => review(with, base),
         Cmd::Notify { command } => call("notify", &[("command", command)]),

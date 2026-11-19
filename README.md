@@ -10,6 +10,8 @@ No machine is the master. It is independent of the Claude account in use, needs 
 
 ## What it is for
 
+- **No shared account needed.** Every peer runs its own Claude Code with its own login. Two or three people, each on a $20 plan, can put their machines on one task; nobody has to move to a $100 plan for the others to take part. See [several small plans](#several-small-plans-on-one-project) for what that does and does not buy.
+- **Planning something large with several instances of your best model.** `agora discuss "<topic>" --model fable` starts one session per machine on that model. They brief each other, propose, criticise and revise until they agree on a plan, or tell you what you have to decide.
 - **Large tasks, split and done in parallel.** Agents agree on a plan and on the interfaces between the parts, then each builds its part on its own branch `agora/<room>/<peer>`.
 - **Agents that check each other.** In a room, peers propose, criticise and ask until they agree, or until they tell you what you have to decide.
 - **Knowledge that sits on different machines.** Each peer has its own files, its own `CLAUDE.md` and memory, and its own access. A question goes to the machine that can answer it.
@@ -28,9 +30,25 @@ No machine is the master. It is independent of the Claude account in use, needs 
 
 The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
 
+**What that means for larger tasks.** The room spent 57 s on briefing, discussion and summary; everything else was work done at the same time. Carried forward as a model, a room is slower than one agent below about two minutes of work and approaches half or a third of the time above it, depending on how much of the work can be split.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/time-model-dark.svg">
+  <img src="docs/img/time-model-light.svg" alt="Line chart: minutes until a task is done against the minutes of work in it, for one agent, two peers and three peers. If all of the work can be split, 60 minutes of work take 60, 31 and 21 minutes. If 70 % can be split, they take 60, 40 and 33 minutes. The one measured run, 73 seconds of work done by two peers in 108 seconds, sits near the origin where one agent is still faster.">
+</picture>
+
+This is a model, not a measurement: it assumes equal packages and leaves out the time to review and merge the branches, which the measured run needed.
+
+**Planning with two instances of the strongest model.** Asked how a small team moves a web shop to another database server without downtime, two Claude Fable sessions went through a proposal, a critique and a revised proposal and reached consensus on an eight-step plan in 49 s, using 248,909 tokens. The critique added what the first proposal lacked: revoking write rights on the old server at cutover, so that a writer nobody thought of fails loudly instead of writing to the wrong database.
+
 **A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
 
 **What a session costs before anyone says anything.** Agents use a small command instead of MCP tools, and the sessions agora-mesh starts carry no connectors. Input tokens of a turn that says one word, on the test machine (`agora bench` measures this on yours):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/session-cost-dark.svg">
+  <img src="docs/img/session-cost-light.svg" alt="Bar chart of the input tokens of one turn: 195,258 for a default headless session with 7 connectors, 23,994 for a session started by agora-mesh, 3,743 for the same without tools.">
+</picture>
 
 | Session | Tokens |
 |---|---|
@@ -39,6 +57,17 @@ The room used 889,880 tokens. One agent given the same task alone took 1,163 s a
 | the same without tools (`agora discuss --lean`) | 3,743 |
 
 This compares headless sessions. An interactive session loads connector tools on demand and is not comparable.
+
+## Shared memory, with Obsidian
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/shared-memory-dark.svg">
+  <img src="docs/img/shared-memory-light.svg" alt="Diagram: three machines, each with Claude Code sessions, an agora daemon and a shared memory of Markdown files. The daemons replicate signed entries between the machines in about a second. One machine's shared memory is connected in both directions with an Obsidian vault.">
+</picture>
+
+Every network has one memory that all its peers keep as plain Markdown files. An agent or a human saves a fact with `agora remember`; a second later it is a file on every machine, signed by the peer that wrote it. Entries marked as important are announced to sessions that are running, by title only.
+
+`agora obsidian <folder>` connects that memory with an Obsidian vault, in both directions: entries appear as notes in `<folder>/agora/<network>/`, and a note you write or change there becomes an entry on all peers. `agora block add "<term>"` keeps text that contains the term out of the memory, whichever way it comes in.
 
 ## How it works
 
@@ -125,6 +154,7 @@ While a room runs:
 | `agora say <room> "<text>"` | say something as a human, or answer when the agents ask you |
 | `agora wait <room>` | the result of a room that paused for your answer |
 | `agora invite <room> <peer>` | bring another peer into the running room |
+| `agora discuss … --model fable` | the model every session of the room uses; default is each machine's own |
 | `agora discuss … --turns N --tokens N --lean` | turns per peer; token budget; discuss without tools |
 
 The shared memory and what happened:
@@ -134,15 +164,32 @@ The shared memory and what happened:
 | `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
 | `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
 | `agora block add "<term>"` | never let this text into the shared memory from this machine |
-| `agora obsidian <folder>` | mirror the entries into an Obsidian vault |
+| `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
 
-## A note on plan arithmetic
+## Several small plans on one project
 
-Bundling accounts does not make usage cheaper per unit. At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance per window, so two Pro plans give two units for $40 and Max gives five for $100. Bundling helps when the accounts exist anyway, for two people working together, or when one plan is not enough. Machines on the same account share one limit.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/own-accounts-dark.svg">
+  <img src="docs/img/own-accounts-light.svg" alt="Diagram: three machines, each on its own $20 plan with its own usage meter, feed one room in which the agents brief each other, discuss, agree on a plan and split the work. The result is a plan or one branch per peer.">
+</picture>
 
-Check the terms of your Claude plan before running several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms.
+Peers do not share an account. Each machine uses the Claude Code login it already has, with its own usage limit and its own context window, and the mesh never sees a login or a token: it only starts the local `claude`.
+
+What that makes possible:
+
+- **Two or three people on $20 plans work on one project together.** Each brings their own limit. `agora peers` shows how much of it everyone has used, and when one peer reaches its limit in the middle of the work, its package moves to a peer that has capacity left.
+- **Nobody needs a larger plan to take part.** A room does not care which plan a peer is on; a peer on a Pro plan and one on a Max plan work in the same room.
+- **Separate context windows.** Every session has its own, so a large task does not have to fit into one.
+
+What it does not do:
+
+- **It does not make usage cheaper.** At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance, so three Pro plans are three units for $60 and one Max plan is five for $100. Agents that discuss also use more tokens in total than one agent alone.
+- **Machines on the same account share one limit.** Bundling only adds capacity across different accounts.
+- **Different accounts are untested.** The mesh contains nothing that depends on the account, but every run so far had both machines on one account.
+
+Check the terms of your Claude plan before one person runs several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms; several people each using their own account is the case this is built for.
 
 ## Compared with
 

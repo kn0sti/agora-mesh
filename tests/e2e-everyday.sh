@@ -46,6 +46,12 @@ check "delegate lets the peer do the task and returns its report" 'grep -q "^DON
 check "peers lists everyone with reachability and usage limit" 'a peers | grep -Eq "^Heimserver +online \((direct|relay).* idle +42 % of its limit used" && a peers | grep -q "^Mac .*this machine"'
 check "a peer without a session yet shows an unknown limit" 'a peers | grep -q "^Laptop .*limit unknown"'
 
+# A model named for a room or a question reaches the session on the other machine
+rm -f "$T/b/fake-args.log"
+a ask "Which model?" --with Heimserver --model fable >/dev/null 2>&1
+check "the model named with a question is passed to the peer's session" 'grep -q -- "--model fable" "$T/b/fake-args.log"'
+check "something that is not a model name is refused" '! a ask "x" --with Heimserver --model "--dangerously-skip-permissions" >/dev/null 2>&1'
+
 # agora review
 mkdir -p "$T/repoA" "$T/repoB"
 G() { git -C "$1" -c user.name=t -c user.email=t@example.com "${@:2}"; }

@@ -53,6 +53,18 @@ a remember "Mirror me." --title "Mirror" >/dev/null
 b remember "From the other side." --title "Remote note" >/dev/null
 check "new entries are mirrored into the vault folder" '[ -f "$T/vault/agora/$NET/mirror.md" ] && wait_for 10 "[ -f \"$T/vault/agora/$NET/remote-note.md\" ]"'
 
+# Obsidian in the other direction: a note written in the vault becomes an entry everywhere
+printf 'Backups run every night at two.\n' > "$T/vault/agora/$NET/Backup plan.md"
+check "a note written in the vault reaches the other peer" 'wait_for 20 "b memory show backup-plan 2>/dev/null | grep -q \"every night at two\""'
+check "it is filed under its id, with the file name as title" 'wait_for 5 "[ -f \"$T/vault/agora/$NET/backup-plan.md\" ] && [ ! -f \"$T/vault/agora/$NET/Backup plan.md\" ]" && grep -q "^title: Backup plan" "$T/vault/agora/$NET/backup-plan.md"'
+sleep 3
+printf '\nRestore tests are on Fridays.\n' >> "$T/vault/agora/$NET/backup-plan.md"
+check "a change made in the vault replaces the entry on all peers" 'wait_for 20 "b memory show backup-plan | grep -q \"Restore tests\""'
+check "an entry that came from a peer is not imported back as a change" '[ "$(ls "$T/a/shared/$NET/history" | grep -c "^remote-note")" = 0 ]'
+printf 'Offer for Weber, 4200 EUR.\n' > "$T/vault/agora/$NET/Offer.md"
+sleep 7
+check "a note with a blocked term stays out of the shared memory" '! a memory | grep -q "^offer " && ! b memory | grep -q "^offer "'
+
 # Forgetting
 a forget mirror >/dev/null
 check "forgetting removes the entry on all peers" 'wait_for 10 "! b memory | grep -q \"^mirror \"" && [ ! -f "$T/b/shared/$NET/mirror.md" ] && [ ! -f "$T/vault/agora/$NET/mirror.md" ]'
