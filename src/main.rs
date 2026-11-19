@@ -1,6 +1,7 @@
 //! `agora` — command and daemon of agora-mesh. See ARCHITECTURE.md.
 
 mod daemon;
+mod project;
 mod proto;
 mod room;
 mod state;
@@ -75,7 +76,19 @@ enum Cmd {
         /// Token budget of the whole room, all peers together
         #[arg(long, default_value = "1000000")]
         tokens: String,
+        /// Git repository the room is about; default: the one you are in. "none" for no project
+        #[arg(long, default_value = "")]
+        project: String,
     },
+    /// Local clones a room session may work in
+    Project {
+        #[command(subcommand)]
+        action: ProjectCmd,
+    },
+    /// Token use of the rooms this machine took part in
+    Stats,
+    /// Measure the fixed context of a session on this machine (uses real Claude sessions)
+    Bench,
     /// Wait for the result of a room that paused for a human
     Wait { room: String },
     /// List running rooms and open invitations
@@ -100,6 +113,20 @@ enum Cmd {
     Stop,
 }
 
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Register a clone; default: the repository you are in
+    Add { path: Option<String> },
+    /// List registered clones
+    List,
+    /// Forget a registered clone
+    Remove { path: String },
+}
+
+fn cwd() -> String {
+    std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -112,7 +139,20 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens } => call("discuss", &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens)]),
+        Cmd::Discuss { topic, with, turns, tokens, project } => {
+            call("discuss", &[("topic", topic), ("with", with), ("turns", turns), ("tokens", tokens), ("project", project), ("cwd", cwd())])
+        }
+        Cmd::Project { action } => match action {
+            ProjectCmd::Add { path } => call("project", &[("action", "add".into()), ("path", path.unwrap_or_else(cwd))]),
+            ProjectCmd::List => call("project", &[("action", "list".into())]),
+            ProjectCmd::Remove { path } => call("project", &[("action", "remove".into()), ("path", path)]),
+        },
+        Cmd::Stats => stats(),
+        Cmd::Bench => {
+            println!("Measuring with real Claude sessions on the smallest model; this takes about a minute.");
+            println!("{}", tokio::runtime::Runtime::new()?.block_on(room::bench())?);
+            Ok(())
+        }
         Cmd::Wait { room } => call("wait", &[("room", room)]),
         Cmd::Trust { name, level, rights } => call("trust", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Rooms => call("rooms", &[]),
@@ -133,7 +173,7 @@ fn setup(name: &str) -> Result<()> {
     }
     let key: [u8; 32] = rand::random();
     let public = iroh::SecretKey::from_bytes(&key).public();
-    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![] }.save()?;
+    State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![] }.save()?;
     println!("Set up peer \"{name}\" with id {public}");
     println!("Data directory: {}", state::home().display());
     Ok(())
@@ -189,6 +229,48 @@ fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
     } else {
         bail!("{}", resp.text)
     }
+}
+
+/// Prints what the rooms on this machine cost, oldest first.
+fn stats() -> Result<()> {
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    if let Ok(dirs) = std::fs::read_dir(state::home().join("rooms")) {
+        for d in dirs.flatten() {
+            if let Ok(text) = std::fs::read_to_string(d.path().join("stats.json")) {
+                if let Ok(v) = serde_json::from_str(&text) {
+                    rows.push(v);
+                }
+            }
+        }
+    }
+    if rows.is_empty() {
+        println!("no closed rooms on this machine");
+        return Ok(());
+    }
+    rows.sort_by_key(|v| v["closed_at"].as_u64().unwrap_or(0));
+    println!("{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}", "room", "role", "msgs", "turns", "in/turn", "out", "all peers", "closed because");
+    let (mut sum_in, mut sum_out) = (0u64, 0u64);
+    for v in &rows {
+        let n = |k: &str| v[k].as_u64().unwrap_or(0);
+        let per_turn = if n("turns") > 0 { n("tokens_in") / n("turns") } else { 0 };
+        let all = v["all_peers_tokens"].as_u64().map(|x| x.to_string()).unwrap_or_else(|| "-".into());
+        println!(
+            "{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}",
+            v["room"].as_str().unwrap_or("?"),
+            v["role"].as_str().unwrap_or("?"),
+            n("messages"),
+            n("turns"),
+            per_turn,
+            n("tokens_out"),
+            all,
+            v["reason"].as_str().unwrap_or("?")
+        );
+        sum_in += n("tokens_in");
+        sum_out += n("tokens_out");
+    }
+    println!("\nThis machine's sessions in {} room(s): {sum_in} input tokens, {sum_out} output tokens.", rows.len());
+    println!("\"in/turn\" is the context a session reads on every turn; \"all peers\" is known only for rooms opened here.");
+    Ok(())
 }
 
 /// Prints a room's log as it grows, until the room has a result.

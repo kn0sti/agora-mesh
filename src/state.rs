@@ -31,6 +31,9 @@ pub struct State {
     pub secret_key: String,
     #[serde(default)]
     pub networks: Vec<Network>,
+    /// Local clones a room session may be started in, see project.rs.
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 /// Data directory. `AGORA_HOME` overrides it, which lets two daemons run on one machine.

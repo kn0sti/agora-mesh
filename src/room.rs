@@ -15,6 +15,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::daemon::Shared;
+use crate::project;
 use crate::proto::{self, KINDS, Member, Msg, Participant};
 use crate::state::home;
 
@@ -56,6 +57,7 @@ pub struct Invite {
     pub turn_budget: u32,
     pub participants: Vec<Participant>,
     pub rights: String,
+    pub project: Option<String>,
 }
 
 #[derive(Clone)]
@@ -97,6 +99,15 @@ struct Session {
     turns: u32,
     tokens_in: u64,
     tokens_out: u64,
+    /// Input tokens of the most recent turn.
+    last_in: u64,
+}
+
+/// `claude` in the headless mode the daemon talks to.
+fn claude_command() -> Command {
+    let mut cmd = Command::new(std::env::var("AGORA_CLAUDE").unwrap_or_else(|_| "claude".into()));
+    cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
+    cmd
 }
 
 impl Session {
@@ -111,8 +122,7 @@ Send CONSENSUS only when you accept the latest proposal as it stands. Send NEED_
 Send PASS when you have nothing to add. \
 A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
         );
-        let mut cmd = Command::new(std::env::var("AGORA_CLAUDE").unwrap_or_else(|_| "claude".into()));
-        cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
+        let mut cmd = claude_command();
         // Connectors cost far more context than the whole discussion; see ARCHITECTURE.md section 7.
         cmd.arg("--strict-mcp-config");
         cmd.args(["--append-system-prompt", &rules]);
@@ -131,6 +141,10 @@ A room starts with a short briefing; during it you are told which first line to 
         if let Ok(extra) = std::env::var("AGORA_CLAUDE_ARGS") {
             cmd.args(extra.split_whitespace());
         }
+        Self::spawn(cmd, dir)
+    }
+
+    fn spawn(mut cmd: Command, dir: &Path) -> Result<Session> {
         let mut child = cmd
             .current_dir(dir)
             .stdin(Stdio::piped())
@@ -141,7 +155,7 @@ A room starts with a short briefing; during it you are told which first line to 
             .map_err(|e| anyhow!("could not start claude: {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        Ok(Session { _child: child, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0 })
+        Ok(Session { _child: child, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0 })
     }
 
     /// Sends one user message and waits for the turn's final answer.
@@ -157,7 +171,8 @@ A room starts with a short briefing; during it you are told which first line to 
                 }
                 let u = &v["usage"];
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                self.tokens_in += n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+                self.last_in = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+                self.tokens_in += self.last_in;
                 self.tokens_out += n("output_tokens");
                 self.turns += 1;
                 let text = v["result"].as_str().unwrap_or("").to_string();
@@ -181,6 +196,55 @@ A room starts with a short briefing; during it you are told which first line to 
         let per_turn = if self.turns > 0 { self.tokens_in / self.turns as u64 } else { 0 };
         format!("{} turns, {} input tokens ({} per turn), {} output tokens", self.turns, self.tokens_in, per_turn, self.tokens_out)
     }
+}
+
+fn write_stats(
+    dir: &Path,
+    room_id: &str,
+    topic: &str,
+    role: &str,
+    reason: &str,
+    messages: usize,
+    session: &Session,
+    all: Option<(u64, serde_json::Map<String, serde_json::Value>)>,
+) {
+    let closed_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut v = serde_json::json!({
+        "room": room_id, "topic": topic, "role": role, "reason": reason, "messages": messages, "closed_at": closed_at,
+        "turns": session.turns, "tokens_in": session.tokens_in, "tokens_out": session.tokens_out,
+    });
+    if let Some((total, peers)) = all {
+        v["all_peers_tokens"] = total.into();
+        v["peers"] = peers.into();
+    }
+    let _ = std::fs::write(dir.join("stats.json"), v.to_string());
+}
+
+/// Measures what one turn costs on this machine before anyone has said
+/// anything: a default headless session, one without connectors, and a room
+/// session. Uses real Claude sessions on the smallest model.
+pub async fn bench() -> Result<String> {
+    let dir = home().join("bench");
+    std::fs::create_dir_all(&dir)?;
+    let variants: [(&str, &[&str]); 3] = [
+        ("default headless session, tools off", &["--tools", ""]),
+        ("without connectors, tools off", &["--strict-mcp-config", "--tools", ""]),
+        ("room session (no connectors, built-in tools)", &["--strict-mcp-config"]),
+    ];
+    let mut out = String::from("Input tokens of one turn that only says one word, measured on this machine:\n\n");
+    for (name, args) in variants {
+        let mut cmd = claude_command();
+        cmd.args(["--model", "haiku", "--no-session-persistence"]);
+        cmd.args(args);
+        let mut s = Session::spawn(cmd, &dir)?;
+        s.turn("Reply with only the word: one").await?;
+        // Connectors finish loading after the first turn; the second turn shows the real cost.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        s.turn("Reply with only the word: two").await?;
+        out.push_str(&format!("  {:>9}  {name}\n", s.last_in));
+    }
+    out.push_str("\nA session reads this again on every turn; after the first turn most of it comes from the cache.");
+    Ok(out)
 }
 
 // ------------------------------------------------------------------- opener
@@ -211,6 +275,7 @@ pub async fn run_opener(
     joiners: Vec<Member>,
     turns: u32,
     token_budget: u64,
+    project: Option<(String, PathBuf)>,
     rx: mpsc::Receiver<RoomEvent>,
     state: watch::Sender<RoomState>,
 ) -> Result<String> {
@@ -223,18 +288,24 @@ pub async fn run_opener(
     let mut participants = vec![me.clone()];
     participants.extend(joiners.iter().cloned());
     for j in &joiners {
-        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, token_budget, participants: participants.clone() };
+        let invite = Msg::RoomInvite { room_id: room_id.clone(), topic: topic.clone(), turn_budget: turns, token_budget, project: project.as_ref().map(|(url, _)| url.clone()), participants: participants.clone() };
         if !shared.send_to(&j.id, invite) {
             bail!("peer \"{}\" is offline", j.name);
         }
     }
 
     let others = joiners.iter().map(|j| j.name.as_str()).collect::<Vec<_>>().join(", ");
-    let session = Session::start(&dir, &me.name, &others, "full")?;
+    // The session works in the project's clone; log and result stay in the room directory.
+    let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
+    let session = Session::start(&work_dir, &me.name, &others, "full")?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
     let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state };
 
-    let outcome = room.run(&topic).await;
+    let brief_topic = match &project {
+        Some((url, d)) => format!("{topic}\nProject: {url}. You are in its local clone at {}.", d.display()),
+        None => topic.clone(),
+    };
+    let outcome = room.run(&brief_topic).await;
     let (reason, result) = match &outcome {
         Ok((reason, result)) => (reason.clone(), result.clone()),
         Err(e) => ("error".to_string(), e.to_string()),
@@ -246,6 +317,9 @@ pub async fn run_opener(
     append(&room.dir, "log.md", &format!("\n---\nClosed: {reason}. This peer: {stats}."));
     std::fs::write(room.dir.join("result.md"), &result)?;
     let total = room.total_tokens();
+    let peers: serde_json::Map<String, serde_json::Value> =
+        room.joiners.iter().map(|j| (j.name.clone(), room.joiner_tokens.get(&j.id).copied().unwrap_or(0).into())).collect();
+    write_stats(&room.dir, &room.room_id, &topic, "opened", &reason, room.log.len(), &room.session, Some((total, peers)));
     let closing = outcome.map(|(reason, result)| format!("{result}\n\n[room {} closed: {reason}; {} messages; this peer: {stats}; all peers: {total} tokens]", room.room_id, room.log.len()))?;
     // What `agora wait` prints when it is asked after the room has closed.
     std::fs::write(room.dir.join("closing.md"), &closing)?;
@@ -497,7 +571,18 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     std::fs::create_dir_all(&dir)?;
     append(&dir, "log.md", &format!("# Room {}\n\nTopic: {}\n", invite.room_id, invite.topic));
     let others = invite.participants.iter().filter(|p| p.id != me).map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-    let mut session = match Session::start(&dir, &my_name, &others, &invite.rights) {
+    // Work in the local clone of the room's project if this machine has one.
+    let clone = invite.project.as_ref().and_then(|url| {
+        let projects = shared.state.lock().unwrap().projects.clone();
+        project::resolve(&projects, url)
+    });
+    let project_note = match (&invite.project, &clone) {
+        (Some(url), Some(d)) => format!("\nProject: {url}. You are in its local clone at {}.", d.display()),
+        (Some(url), None) => format!("\nProject: {url}. This machine has no registered clone of it, so you cannot look at its files; say so."),
+        _ => String::new(),
+    };
+    let work_dir = clone.unwrap_or_else(|| dir.clone());
+    let mut session = match Session::start(&work_dir, &my_name, &others, &invite.rights) {
         Ok(s) => s,
         Err(e) => {
             shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: e.to_string() });
@@ -523,7 +608,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
                 }
                 let briefing = news.iter().any(|e| e.kind == "BRIEF");
                 let ask = if briefing {
-                    format!("Topic: {}\n\nBriefing: your turn. First line: KNOWN_MISSING. Say briefly what you already know about this and what you are missing to take part. Do not propose anything yet; the discussion starts after the opener has answered.", invite.topic)
+                    format!("Topic: {}{project_note}\n\nBriefing: your turn. First line: KNOWN_MISSING. Say briefly what you already know about this and what you are missing to take part. Do not propose anything yet; the discussion starts after the opener has answered.", invite.topic)
                 } else {
                     format!("Your turn ({my_left} turns left).")
                 };
@@ -558,5 +643,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
         Err(e) => format!("error: {e}"),
     };
     append(&dir, "log.md", &format!("\n---\nClosed: {reason}. This peer: {}.", session.stats()));
+    let messages = std::fs::read_to_string(dir.join("log.md")).map(|l| l.lines().filter(|x| x.starts_with("[#")).count()).unwrap_or(0);
+    write_stats(&dir, &invite.room_id, &invite.topic, "joined", &reason, messages, &session, None);
     outcome.map(|_| ())
 }
