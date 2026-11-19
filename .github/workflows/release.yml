@@ -1,0 +1,71 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  verify-versions:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag, Cargo.toml and plugin.json must agree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
+          plugin_v=$(sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' .claude-plugin/plugin.json | head -n1)
+          echo "tag=$tag Cargo.toml=$cargo_v plugin.json=$plugin_v"
+          if ! echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then echo "tag must be vX.Y.Z"; exit 1; fi
+          [ "$tag" = "$cargo_v" ] && [ "$tag" = "$plugin_v" ]
+  build:
+    needs: verify-versions
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {target: x86_64-apple-darwin,         os: macos-13,          musl: false, ext: ""}
+          - {target: aarch64-apple-darwin,        os: macos-latest,      musl: false, ext: ""}
+          - {target: x86_64-unknown-linux-gnu,    os: ubuntu-22.04,      musl: false, ext: ""}
+          - {target: aarch64-unknown-linux-gnu,   os: ubuntu-22.04-arm,  musl: false, ext: ""}
+          - {target: x86_64-unknown-linux-musl,   os: ubuntu-22.04,      musl: true,  ext: ""}
+          - {target: aarch64-unknown-linux-musl,  os: ubuntu-22.04-arm,  musl: true,  ext: ""}
+          - {target: x86_64-pc-windows-msvc,      os: windows-latest,    musl: false, ext: ".exe"}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: stage asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/agora${{ matrix.ext }}" "dist/agora-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agora-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -1 | LC_ALL=C sort | grep -v '^SHA256SUMS$' | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 7 ]
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -1,0 +1,8 @@
+{
+  "description": "Make sure the agora daemon runs when a session starts",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"" } ] }
+    ]
+  }
+}

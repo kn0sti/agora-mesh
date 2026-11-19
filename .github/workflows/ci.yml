@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo test
+      - name: e2e scripts
+        run: |
+          set -u
+          fail=0
+          for t in tests/e2e-*.sh; do
+            echo "::group::$t"
+            bash "$t" target/debug/agora || { echo "FAILED: $t"; fail=1; }
+            echo "::endgroup::"
+          done
+          exit $fail
