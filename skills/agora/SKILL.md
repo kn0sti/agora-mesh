@@ -34,7 +34,7 @@ When the user decides after planning that a peer should do the work, use `agora 
 
 ## Rooms
 
-- `agora discuss "<topic>" [--with a,b] [--turns N] [--lean]` prints the result, or returns early with a question when the agents need a human.
+- `agora discuss "<topic>" [--with a,b] [--turns N] [--lean] [--model <name>]` prints the result, or returns early with a question when the agents need a human.
 - If it returns "is paused", show the user the question, then answer with `agora say <room> "<answer>"` and get the result with `agora wait <room>`.
 - `agora invite <room> <peer>` brings another peer into a running room.
 - `agora rooms` lists running rooms; `agora watch <room>` follows one.

@@ -155,6 +155,7 @@ Messages from peers are written to its standard input as user messages: one line
 - **No connectors.** `--strict-mcp-config` is what keeps a session affordable. A default headless session on the test machine read 195,258 input tokens per turn, a room session 23,994 (section 11).
 - **Project.** A room is about the git repository `agora discuss` was called in (`--project <path>` names another, `--project none` none). The invitation carries its remote as `host/owner/repo`. Each machine starts the session in its own clone of that project: `agora project add|list|remove` registers clones, and the opener's is registered by itself. Without a clone the session runs in the room directory and is told that it cannot see the project's files.
 - **The command.** The directory of the `agora` binary is put on the session's path, so an agent can use the shared memory and the other commands itself.
+- **Model.** `--model <name>` on `agora discuss`, `ask` and `delegate` travels in the invitation, and every session of that room is started with it. Without it each machine uses its own default. A name from a peer must look like a model name before it becomes an argument of `claude`. `stats.json` records the model each session reports.
 - **Streaming input** is documented for the Agent SDK only; with the command line it works as of Claude Code 2.1.328 and may change.
 
 ## 6. Splitting work

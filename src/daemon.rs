@@ -651,9 +651,9 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::UnboundedSe
             }
             Ok(true)
         }
-        Msg::RoomInvite { room_id, topic, turn_budget, participants, project, mode, catch_up, seq, lean, .. } => {
+        Msg::RoomInvite { room_id, topic, turn_budget, participants, project, mode, catch_up, seq, lean, model, .. } => {
             if is_live_member(shared, peer, tx) {
-                let invite = Invite { room_id, topic, from: peer.to_string(), turn_budget, participants, rights: String::new(), project, mode, catch_up, seq, lean };
+                let invite = Invite { room_id, topic, from: peer.to_string(), turn_budget, participants, rights: String::new(), project, mode, catch_up, seq, lean, model: model.filter(|m| proto::valid_model(m)) };
                 on_invite(shared, peer, invite);
             }
             Ok(true)
@@ -1213,7 +1213,7 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
             let (cancel, _) = watch::channel(false);
             shared.rooms.lock().unwrap().insert(id.clone(), RoomHandle { topic: question.clone(), role, tx, state: None, cancel, from: None });
             shared.announce_rooms();
-            let result = room::run_ask(shared.clone(), id.clone(), question, peer, project, mode, rx).await;
+            let result = room::run_ask(shared.clone(), id.clone(), question, peer, project, mode, model_of(req)?, rx).await;
             shared.rooms.lock().unwrap().remove(&id);
             shared.announce_rooms();
             result
@@ -1283,6 +1283,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         bail!("turns must be between 1 and 30");
     }
     let lean = req.args.get("lean").is_some_and(|v| v == "1");
+    let model = model_of(req)?;
     let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
@@ -1332,7 +1333,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let note_topic = topic.clone();
     tokio::spawn(async move {
         // In a task of its own, so that the room is removed even if it panics.
-        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, project, rx, state_tx.clone(), cancelled);
+        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, project, rx, state_tx.clone(), cancelled);
         let result = tokio::spawn(run).await.unwrap_or_else(|e| Err(anyhow!("the room crashed: {e}")));
         if let Ok(text) = &result {
             event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
@@ -1349,6 +1350,15 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         sh.announce_rooms();
     });
     wait_room(&id, state_rx).await
+}
+
+/// The model a command names for the sessions it starts, if any.
+fn model_of(req: &Request) -> Result<Option<String>> {
+    match req.args.get("model").filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some(m) if proto::valid_model(m) => Ok(Some(m.clone())),
+        Some(m) => bail!("\"{m}\" does not look like a model name"),
+    }
 }
 
 /// The project a command is about: the git repository it was called in, unless

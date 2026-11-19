@@ -225,9 +225,66 @@ def shared_memory(mode):
     save(fig, "shared-memory", mode, t)
 
 
+def own_accounts(mode):
+    """Every peer brings its own account and its own limit."""
+    t = THEMES[mode]
+    fig, ax = plt.subplots(figsize=(11.5, 5.6))
+    fig.patch.set_facecolor(t["surface"])
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.82, bottom=0.03)
+    ax.set_facecolor(t["surface"])
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 50)
+    ax.axis("off")
+
+    def box(x, y, w, h, face, edge=None, radius=1.4):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={radius}", linewidth=1,
+                                    edgecolor=edge or t["border"], facecolor=face, zorder=2))
+
+    def label(x, y, text, size=10.5, weight="normal", color=None, ha="center", va="center"):
+        ax.text(x, y, text, ha=ha, va=va, fontsize=size, fontweight=weight, color=color or t["ink"], zorder=5, linespacing=1.4)
+
+    def arrow(a, b):
+        ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-|>", mutation_scale=13, linewidth=1.6, color=t["ink2"], shrinkA=0, shrinkB=0, zorder=4))
+
+    # Three peers. The usage figures are an example, not a measurement.
+    peers = [("Anna's laptop", "$20 plan", 0.35), ("Ben's desktop", "$20 plan", 0.60), ("Home server", "$20 plan", 0.15)]
+    w, h = 29, 11
+    ys = [35.5, 21, 6.5]
+    for (name, plan, used), y in zip(peers, ys):
+        box(3, y, w, h, t["page"])
+        label(4.8, y + h - 3.1, name, size=12, weight="semibold", ha="left")
+        label(3 + w - 1.8, y + h - 3.1, plan, size=10, color=t["ink2"], ha="right")
+        # A meter: the track is a lighter step of the fill's own hue.
+        mx, mw, mh = 4.8, w - 12.5, 1.5
+        ax.add_patch(FancyBboxPatch((mx, y + 2.4), mw, mh, boxstyle="round,pad=0,rounding_size=0.75", linewidth=0, facecolor=t["wash1"], zorder=3))
+        ax.add_patch(FancyBboxPatch((mx, y + 2.4), mw * used, mh, boxstyle="round,pad=0,rounding_size=0.75", linewidth=0, facecolor=t["s1"], zorder=4))
+        label(mx + mw + 1.2, y + 3.15, f"{used:.0%} used", size=9.5, color=t["ink2"], ha="left")
+        arrow((3 + w + 0.6, y + h / 2), (41.4, 26.5 + (y + h / 2 - 26.5) * 0.28))
+
+    box(42, 14.5, 25, 24, t["wash3"], edge=t["s3"])
+    label(54.5, 34.4, "One room", size=13, weight="semibold")
+    label(54.5, 25, "brief each other\ndiscuss and criticise\nagree on a plan\nsplit the work", size=10.5, color=t["ink"])
+    label(54.5, 16.6, "one session per machine", size=9, color=t["ink2"])
+
+    arrow((67.6, 26.5), (73.4, 26.5))
+    box(74, 14.5, 23, 24, t["page"])
+    label(85.5, 34.4, "For you", size=13, weight="semibold")
+    label(85.5, 25, "a plan the agents\nagree on, or\none branch per peer\nwith its part done", size=10.5)
+    label(85.5, 16.6, "and what is left to decide", size=9, color=t["ink2"])
+
+    label(42, 9.2, "No shared login. The mesh starts the Claude Code that is installed on each machine.", size=10, ha="left")
+    label(42, 5.4, "A peer at its limit hands its package to one that has capacity left.", size=10, ha="left")
+
+    fig.text(0.03, 0.955, "Every peer brings its own account and its own limit", color=t["ink"], fontsize=17, fontweight="semibold", va="top")
+    fig.text(0.03, 0.885, "Several small plans work on one project. Usage shown is an example; agora peers shows the real figures.",
+             color=t["ink2"], fontsize=11, va="top")
+    save(fig, "own-accounts", mode, t)
+
+
 if __name__ == "__main__":
     for mode in THEMES:
         time_model(mode)
         session_cost(mode)
         shared_memory(mode)
+        own_accounts(mode)
     print("wrote", sorted(f for f in os.listdir(HERE) if f.endswith((".svg", ".png"))))

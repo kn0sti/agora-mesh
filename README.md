@@ -10,6 +10,8 @@ No machine is the master. It is independent of the Claude account in use, needs 
 
 ## What it is for
 
+- **No shared account needed.** Every peer runs its own Claude Code with its own login. Two or three people, each on a $20 plan, can put their machines on one task; nobody has to move to a $100 plan for the others to take part. See [several small plans](#several-small-plans-on-one-project) for what that does and does not buy.
+- **Planning something large with several instances of your best model.** `agora discuss "<topic>" --model fable` starts one session per machine on that model. They brief each other, propose, criticise and revise until they agree on a plan, or tell you what you have to decide.
 - **Large tasks, split and done in parallel.** Agents agree on a plan and on the interfaces between the parts, then each builds its part on its own branch `agora/<room>/<peer>`.
 - **Agents that check each other.** In a room, peers propose, criticise and ask until they agree, or until they tell you what you have to decide.
 - **Knowledge that sits on different machines.** Each peer has its own files, its own `CLAUDE.md` and memory, and its own access. A question goes to the machine that can answer it.
@@ -36,6 +38,8 @@ The room used 889,880 tokens. One agent given the same task alone took 1,163 s a
 </picture>
 
 This is a model, not a measurement: it assumes equal packages and leaves out the time to review and merge the branches, which the measured run needed.
+
+**Planning with two instances of the strongest model.** Asked how a small team moves a web shop to another database server without downtime, two Claude Fable sessions went through a proposal, a critique and a revised proposal and reached consensus on an eight-step plan in 49 s, using 248,909 tokens. The critique added what the first proposal lacked: revoking write rights on the old server at cutover, so that a writer nobody thought of fails loudly instead of writing to the wrong database.
 
 **A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
 
@@ -150,6 +154,7 @@ While a room runs:
 | `agora say <room> "<text>"` | say something as a human, or answer when the agents ask you |
 | `agora wait <room>` | the result of a room that paused for your answer |
 | `agora invite <room> <peer>` | bring another peer into the running room |
+| `agora discuss … --model fable` | the model every session of the room uses; default is each machine's own |
 | `agora discuss … --turns N --tokens N --lean` | turns per peer; token budget; discuss without tools |
 
 The shared memory and what happened:
@@ -163,11 +168,28 @@ The shared memory and what happened:
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
 
-## A note on plan arithmetic
+## Several small plans on one project
 
-Bundling accounts does not make usage cheaper per unit. At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance per window, so two Pro plans give two units for $40 and Max gives five for $100. Bundling helps when the accounts exist anyway, for two people working together, or when one plan is not enough. Machines on the same account share one limit.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/own-accounts-dark.svg">
+  <img src="docs/img/own-accounts-light.svg" alt="Diagram: three machines, each on its own $20 plan with its own usage meter, feed one room in which the agents brief each other, discuss, agree on a plan and split the work. The result is a plan or one branch per peer.">
+</picture>
 
-Check the terms of your Claude plan before running several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms.
+Peers do not share an account. Each machine uses the Claude Code login it already has, with its own usage limit and its own context window, and the mesh never sees a login or a token: it only starts the local `claude`.
+
+What that makes possible:
+
+- **Two or three people on $20 plans work on one project together.** Each brings their own limit. `agora peers` shows how much of it everyone has used, and when one peer reaches its limit in the middle of the work, its package moves to a peer that has capacity left.
+- **Nobody needs a larger plan to take part.** A room does not care which plan a peer is on; a peer on a Pro plan and one on a Max plan work in the same room.
+- **Separate context windows.** Every session has its own, so a large task does not have to fit into one.
+
+What it does not do:
+
+- **It does not make usage cheaper.** At the time of writing a Pro plan costs $20 and a Max plan $100 for five times the Pro allowance, so three Pro plans are three units for $60 and one Max plan is five for $100. Agents that discuss also use more tokens in total than one agent alone.
+- **Machines on the same account share one limit.** Bundling only adds capacity across different accounts.
+- **Different accounts are untested.** The mesh contains nothing that depends on the account, but every run so far had both machines on one account.
+
+Check the terms of your Claude plan before one person runs several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms; several people each using their own account is the case this is built for.
 
 ## Compared with
 

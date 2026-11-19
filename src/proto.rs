@@ -67,6 +67,9 @@ pub enum Msg {
         /// Discuss without tools; a second session with tools does the work.
         #[serde(default)]
         lean: bool,
+        /// The model every session of the room should use; each machine's default if none.
+        #[serde(default)]
+        model: Option<String>,
     },
     /// Joiner to opener: send the room's messages again from this number on.
     #[serde(rename = "RESEND")]
@@ -231,6 +234,15 @@ pub fn valid_network_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// A model name becomes an argument of `claude`. It may be an alias or a full
+/// name such as `fable`, `claude-sonnet-5-5` or `opus[1m]`, and nothing else.
+pub fn valid_model(model: &str) -> bool {
+    let mut chars = model.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && model.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '[' | ']'))
+}
+
 /// A peer's own name for itself, reduced to what is safe to show and to type.
 pub fn clean_name(name: &str) -> String {
     let out: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).take(32).collect();
@@ -324,6 +336,16 @@ mod tests {
         assert!(Capacity::from_event(&full).unwrap().limited);
         let near = serde_json::json!({"status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.99, "resetsAt": 5}}});
         assert!(Capacity::from_event(&near).unwrap().limited);
+    }
+
+    #[test]
+    fn a_model_name_cannot_smuggle_in_an_option() {
+        for ok in ["fable", "claude-sonnet-5-5", "opus[1m]", "haiku"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        for bad in ["", "--dangerously-skip-permissions", "-p", "a b", "x;y", &"m".repeat(65)] {
+            assert!(!valid_model(bad), "{bad}");
+        }
     }
 
     #[test]
