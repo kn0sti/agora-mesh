@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agora-mesh",
+  "owner": { "name": "kn0sti" },
+  "metadata": { "description": "agora-mesh: Claude Code agents on your machines work together" },
+  "plugins": [
+    {
+      "name": "agora-mesh",
+      "description": "Ask, delegate to, review with and discuss with Claude Code agents on your other machines.",
+      "source": "./"
+    }
+  ]
+}

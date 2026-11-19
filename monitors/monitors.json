@@ -1,0 +1,7 @@
+[
+  {
+    "name": "agora-events",
+    "description": "agora-mesh events: requests, invitations, rooms, important memory entries",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agora\" events --follow"
+  }
+]

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Launcher: runs the agora binary, downloading the pinned release on first use.
+# AGORA_BIN overrides everything. AGORA_RELEASE_BASE overrides the download base (tests).
+set -eu
+
+if [ -n "${AGORA_BIN:-}" ] && [ -x "$AGORA_BIN" ]; then exec "$AGORA_BIN" "$@"; fi
+
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+data="${CLAUDE_PLUGIN_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/agora-mesh-plugin}"
+version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
+[ -n "$version" ] || { echo "agora: cannot read version from plugin.json" >&2; exit 1; }
+base="${AGORA_RELEASE_BASE:-https://github.com/kn0sti/agora-mesh/releases/download}/v$version"
+
+os=$(uname -s); arch=$(uname -m)
+case "$arch" in x86_64|amd64) arch=x86_64 ;; arm64|aarch64) arch=aarch64 ;;
+  *) echo "agora: unsupported CPU $arch" >&2; exit 1 ;; esac
+case "$os" in
+  Darwin) triple="$arch-apple-darwin" ;;
+  Linux)
+    if ldd --version 2>&1 | grep -qi 'musl'; then libc=musl
+    elif ldd --version 2>&1 | grep -qiE 'glibc|gnu libc'; then libc=gnu
+    else libc=musl; fi
+    triple="$arch-unknown-linux-$libc" ;;
+  *) echo "agora: unsupported system $os" >&2; exit 1 ;;
+esac
+
+dir="$data/bin/$version"
+bin="$dir/agora"
+if [ ! -x "$bin" ]; then
+  asset="agora-$triple"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/agora.XXXXXX")
+  trap 'rm -rf "$tmp"' EXIT
+  echo "agora: downloading $asset v$version ..." >&2
+  fetch() { if command -v curl >/dev/null 2>&1; then curl -fsSL -o "$2" "$1"; else wget -q -O "$2" "$1"; fi; }
+  fetch "$base/$asset" "$tmp/$asset" || { echo "agora: download failed: $base/$asset" >&2; exit 1; }
+  fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || { echo "agora: download failed: $base/SHA256SUMS" >&2; exit 1; }
+  want=$(awk -v f="$asset" '$2==f || $2=="*"f {print $1; exit}' "$tmp/SHA256SUMS")
+  [ -n "$want" ] || { echo "agora: $asset not listed in SHA256SUMS" >&2; exit 1; }
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$asset" | awk '{print $1}')
+  else got=$(shasum -a 256 "$tmp/$asset" | awk '{print $1}'); fi
+  [ "$got" = "$want" ] || { echo "agora: checksum mismatch for $asset, download discarded" >&2; exit 1; }
+  chmod +x "$tmp/$asset"
+  mkdir -p "$dir"
+  mv "$tmp/$asset" "$bin.new" 2>/dev/null || cp "$tmp/$asset" "$bin.new"
+  mv "$bin.new" "$bin"
+fi
+exec "$bin" "$@"
