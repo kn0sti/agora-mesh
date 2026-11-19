@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::project;
-use crate::proto::{self, ALPN, Member, Msg, Ticket};
+use crate::proto::{self, ALPN, Capacity, Member, Msg, Ticket};
 use crate::room::{self, Invite, RoomEvent, RoomHandle, RoomState};
 use crate::state::{NetStatus, Network, State, home};
 
@@ -64,6 +64,8 @@ pub struct Shared {
     conns: Mutex<HashMap<String, mpsc::Sender<Msg>>>,
     /// Rooms running on this machine.
     rooms: Mutex<HashMap<String, RoomHandle>>,
+    /// Last known capacity per peer id, our own included.
+    capacity: Mutex<HashMap<String, Capacity>>,
     /// Invitations waiting for `agora accept`.
     invites: Mutex<HashMap<String, Invite>>,
     /// Join requests waiting for a human, by nickname.
@@ -73,6 +75,20 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Records this machine's capacity and tells every connected peer.
+    pub fn report_capacity(&self, capacity: Capacity) {
+        let changed = self.capacity.lock().unwrap().insert(self.me.clone(), capacity) != Some(capacity);
+        if changed {
+            for tx in self.conns.lock().unwrap().values() {
+                let _ = tx.try_send(Msg::Status { capacity });
+            }
+        }
+    }
+
+    pub fn capacity_of(&self, peer: &str) -> Option<Capacity> {
+        self.capacity.lock().unwrap().get(peer).copied()
+    }
+
     /// Queues a message for an approved, connected peer. False if it is offline.
     pub fn send_to(&self, peer: &str, msg: Msg) -> bool {
         match self.conns.lock().unwrap().get(peer) {
@@ -109,6 +125,7 @@ pub async fn run() -> Result<()> {
         state: Mutex::new(state),
         conns: Mutex::new(HashMap::new()),
         rooms: Mutex::new(HashMap::new()),
+        capacity: Mutex::new(HashMap::new()),
         invites: Mutex::new(HashMap::new()),
         pending: Mutex::new(HashMap::new()),
         dialing: Mutex::new(HashSet::new()),
@@ -357,6 +374,12 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
             }
             Ok(still_member)
         }
+        Msg::Status { capacity } => {
+            if is_live_member(shared, peer, tx) {
+                shared.capacity.lock().unwrap().insert(peer.to_string(), capacity);
+            }
+            Ok(true)
+        }
         Msg::RoomInvite { room_id, topic, turn_budget, participants, project, .. } => {
             if is_live_member(shared, peer, tx) {
                 on_invite(shared, peer, room_id, topic, turn_budget, participants, project);
@@ -367,6 +390,7 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::Sender<Msg>
         | Msg::RoomDecline { ref room_id, .. }
         | Msg::Say { ref room_id, .. }
         | Msg::Discuss { ref room_id, .. }
+        | Msg::Work { ref room_id, .. }
         | Msg::RoomClose { ref room_id, .. } => {
             if is_live_member(shared, peer, tx) {
                 if let Some(room) = shared.rooms.lock().unwrap().get(room_id) {
@@ -824,7 +848,9 @@ fn status(shared: &Shared) -> String {
     let state = shared.state.lock().unwrap();
     let conns = shared.conns.lock().unwrap();
     let pending = shared.pending.lock().unwrap();
-    let mut out = format!("peer \"{}\"  id {}\n", state.name, shared.me);
+    let capacity = shared.capacity.lock().unwrap();
+    let cap = |id: &str| capacity.get(id).map(|c| format!("  {}", c.describe())).unwrap_or_default();
+    let mut out = format!("peer \"{}\"  id {}{}\n", state.name, shared.me, cap(&shared.me));
     if state.networks.is_empty() {
         out.push_str("no networks\n");
     }
@@ -839,7 +865,7 @@ fn status(shared: &Shared) -> String {
                 out.push_str(&format!("network {}  {} peer(s)\n", net.id, net.peers.len()));
                 for m in &net.peers {
                     let link = if conns.contains_key(&m.id) { "online" } else { "offline" };
-                    out.push_str(&format!("  {:<16} {:<8} level {} rights {}\n", m.name, link, m.level, m.rights));
+                    out.push_str(&format!("  {:<16} {:<8} level {} rights {}{}\n", m.name, link, m.level, m.rights, cap(&m.id)));
                 }
             }
         }
@@ -850,6 +876,7 @@ fn status(shared: &Shared) -> String {
     drop(pending);
     drop(conns);
     drop(state);
+    drop(capacity);
     let r = rooms(shared);
     if r != "no rooms\n" {
         out.push_str(&r);

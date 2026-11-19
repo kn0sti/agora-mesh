@@ -17,6 +17,13 @@ use clap::{Parser, Subcommand};
 use daemon::{DaemonInfo, Request, Response};
 use state::State;
 
+/// Prints a line. A reader that stops early (`agora status | grep -q ...`) is not an error.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 #[derive(Parser)]
 #[command(name = "agora", version, about = "Symmetric peer-to-peer mesh for Claude Code")]
 struct Cli {
@@ -149,8 +156,8 @@ fn main() -> Result<()> {
         },
         Cmd::Stats => stats(),
         Cmd::Bench => {
-            println!("Measuring with real Claude sessions on the smallest model; this takes about a minute.");
-            println!("{}", tokio::runtime::Runtime::new()?.block_on(room::bench())?);
+            say!("Measuring with real Claude sessions on the smallest model; this takes about a minute.");
+            say!("{}", tokio::runtime::Runtime::new()?.block_on(room::bench())?);
             Ok(())
         }
         Cmd::Wait { room } => call("wait", &[("room", room)]),
@@ -174,8 +181,8 @@ fn setup(name: &str) -> Result<()> {
     let key: [u8; 32] = rand::random();
     let public = iroh::SecretKey::from_bytes(&key).public();
     State { name: name.to_string(), secret_key: data_encoding::HEXLOWER.encode(&key), networks: vec![], projects: vec![] }.save()?;
-    println!("Set up peer \"{name}\" with id {public}");
-    println!("Data directory: {}", state::home().display());
+    say!("Set up peer \"{name}\" with id {public}");
+    say!("Data directory: {}", state::home().display());
     Ok(())
 }
 
@@ -224,7 +231,7 @@ fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
     BufReader::new(stream).read_line(&mut line)?;
     let resp: Response = serde_json::from_str(&line).map_err(|_| anyhow!("the daemon gave no valid answer"))?;
     if resp.ok {
-        println!("{}", resp.text.trim_end());
+        say!("{}", resp.text.trim_end());
         Ok(())
     } else {
         bail!("{}", resp.text)
@@ -244,17 +251,17 @@ fn stats() -> Result<()> {
         }
     }
     if rows.is_empty() {
-        println!("no closed rooms on this machine");
+        say!("no closed rooms on this machine");
         return Ok(());
     }
     rows.sort_by_key(|v| v["closed_at"].as_u64().unwrap_or(0));
-    println!("{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}", "room", "role", "msgs", "turns", "in/turn", "out", "all peers", "closed because");
+    say!("{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}", "room", "role", "msgs", "turns", "in/turn", "out", "all peers", "closed because");
     let (mut sum_in, mut sum_out) = (0u64, 0u64);
     for v in &rows {
         let n = |k: &str| v[k].as_u64().unwrap_or(0);
         let per_turn = if n("turns") > 0 { n("tokens_in") / n("turns") } else { 0 };
         let all = v["all_peers_tokens"].as_u64().map(|x| x.to_string()).unwrap_or_else(|| "-".into());
-        println!(
+        say!(
             "{:<9} {:<7} {:>4} {:>5} {:>9} {:>8} {:>10}  {}",
             v["room"].as_str().unwrap_or("?"),
             v["role"].as_str().unwrap_or("?"),
@@ -268,8 +275,8 @@ fn stats() -> Result<()> {
         sum_in += n("tokens_in");
         sum_out += n("tokens_out");
     }
-    println!("\nThis machine's sessions in {} room(s): {sum_in} input tokens, {sum_out} output tokens.", rows.len());
-    println!("\"in/turn\" is the context a session reads on every turn; \"all peers\" is known only for rooms opened here.");
+    say!("\nThis machine's sessions in {} room(s): {sum_in} input tokens, {sum_out} output tokens.", rows.len());
+    say!("\"in/turn\" is the context a session reads on every turn; \"all peers\" is known only for rooms opened here.");
     Ok(())
 }
 
@@ -298,7 +305,7 @@ fn watch(room: &str) -> Result<()> {
 
 fn stop() -> Result<()> {
     let Some(info) = read_info() else {
-        println!("The daemon is not running.");
+        say!("The daemon is not running.");
         return Ok(());
     };
     #[cfg(unix)]
@@ -310,6 +317,6 @@ fn stop() -> Result<()> {
         std::process::Command::new("taskkill").args(["/PID", &info.pid.to_string(), "/F"]).status()?;
         let _ = std::fs::remove_file(DaemonInfo::path());
     }
-    println!("Stopped the daemon (pid {}).", info.pid);
+    say!("Stopped the daemon (pid {}).", info.pid);
     Ok(())
 }

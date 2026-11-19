@@ -3,7 +3,7 @@
 //! The opener's daemon numbers the messages and says who speaks next. That is
 //! ordering, not authority: after the briefing all participants take equal turns.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -16,11 +16,13 @@ use tokio::sync::{mpsc, watch};
 
 use crate::daemon::Shared;
 use crate::project;
-use crate::proto::{self, KINDS, Member, Msg, Participant};
+use crate::proto::{self, Capacity, KINDS, Member, Msg, Participant};
 use crate::state::home;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long one work package may take.
+const WORK_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// How long a room waits for a human after NEED_HUMAN before it closes.
 const PAUSE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
@@ -71,7 +73,7 @@ struct Entry {
 }
 
 fn render(e: &Entry) -> String {
-    if e.kind == "HUMAN" || e.kind == "BRIEF" || e.kind == "KNOWN_MISSING" {
+    if matches!(e.kind.as_str(), "HUMAN" | "BRIEF" | "KNOWN_MISSING" | "WORK" | "DONE" | "BLOCKED" | "HANDOVER" | "LIMIT") {
         format!("[#{} {} · {}]\n{}\n", e.seq, e.from_name, e.kind, e.text)
     } else {
         format!("[#{} {} · {} · {} left]\n{}\n", e.seq, e.from_name, e.kind, e.turns_left, e.text)
@@ -101,6 +103,52 @@ struct Session {
     tokens_out: u64,
     /// Input tokens of the most recent turn.
     last_in: u64,
+    /// What the most recent turn reported about the usage limit.
+    capacity: Option<Capacity>,
+    timeout: Duration,
+}
+
+/// The session's turn failed because the account is at its usage limit.
+#[derive(Debug)]
+struct LimitReached;
+
+impl std::fmt::Display for LimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "usage limit reached")
+    }
+}
+
+impl std::error::Error for LimitReached {}
+
+fn is_limit(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<LimitReached>().is_some()
+}
+
+/// Whether an error result means the usage limit. The exact wording of a real
+/// limit error is not verified; status 429 and the usual phrases are accepted.
+fn is_limit_error(v: &serde_json::Value, text: &str) -> bool {
+    let t = text.to_lowercase();
+    v["api_error_status"].as_u64() == Some(429) || ["usage limit", "rate limit", "limit reached", "hit your limit"].iter().any(|p| t.contains(p))
+}
+
+/// What a session is told when it starts a work package.
+fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>, has_repo: bool) -> String {
+    let takeover = match taken_from {
+        Some(from) => format!(" This package was started by {from}, who reached a usage limit; continue their work."),
+        None => String::new(),
+    };
+    let how = if has_repo {
+        format!(
+            "Do the work now in this repository on the branch `{branch}`: fetch origin and switch to it if it exists there, \
+otherwise create it from the current HEAD. Commit your work on it and push it to origin if you are allowed to."
+        )
+    } else {
+        "This machine has no clone of a shared repository for this room, so describe your result in the reply instead of committing.".to_string()
+    };
+    format!(
+        "Work phase. Package #{package}: {title}\n{how}{takeover}\n\
+Reply with the first line DONE or BLOCKED, then at most five lines: what you did, the branch, the last commit, and what is left."
+    )
 }
 
 /// `claude` in the headless mode the daemon talks to.
@@ -120,6 +168,8 @@ Reply format: the first line is exactly one of PROPOSAL, CRITIQUE, QUESTION, ANS
 your message follows on the next lines. Keep it short. Refer to earlier messages as #number instead of repeating them. \
 Send CONSENSUS only when you accept the latest proposal as it stands. Send NEED_HUMAN when a human has to decide. \
 Send PASS when you have nothing to add. \
+To divide work, send SPLIT_WORK with one line per package in the form `- <peer name>: <package>`; \
+once every peer answers CONSENSUS, all peers work on their packages at the same time. \
 A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
         );
         let mut cmd = claude_command();
@@ -155,7 +205,7 @@ A room starts with a short briefing; during it you are told which first line to 
             .map_err(|e| anyhow!("could not start claude: {e}"))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        Ok(Session { _child: child, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0 })
+        Ok(Session { _child: child, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT })
     }
 
     /// Sends one user message and waits for the turn's final answer.
@@ -163,9 +213,16 @@ A room starts with a short briefing; during it you are told which first line to 
         let msg = serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
         self.stdin.write_all(format!("{msg}\n").as_bytes()).await?;
         self.stdin.flush().await?;
-        let answer = tokio::time::timeout(TURN_TIMEOUT, async {
+        let limit = self.timeout;
+        let answer = tokio::time::timeout(limit, async {
             while let Some(line) = self.lines.next_line().await? {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if v["type"] == "rate_limit_event" {
+                    if let Some(c) = Capacity::from_event(&v["rate_limit_info"]) {
+                        self.capacity = Some(c);
+                    }
+                    continue;
+                }
                 if v["type"] != "result" {
                     continue;
                 }
@@ -177,6 +234,11 @@ A room starts with a short briefing; during it you are told which first line to 
                 self.turns += 1;
                 let text = v["result"].as_str().unwrap_or("").to_string();
                 if v["is_error"].as_bool().unwrap_or(false) {
+                    if is_limit_error(&v, &text) {
+                        let resets_at = self.capacity.map(|c| c.resets_at).unwrap_or(0);
+                        self.capacity = Some(Capacity { utilization: 1.0, resets_at, limited: true });
+                        return Err(LimitReached.into());
+                    }
                     bail!("the Claude session reported an error: {text}");
                 }
                 return Ok(text);
@@ -184,7 +246,7 @@ A room starts with a short briefing; during it you are told which first line to 
             bail!("the Claude session ended unexpectedly")
         })
         .await
-        .map_err(|_| anyhow!("the Claude session did not answer within {} minutes", TURN_TIMEOUT.as_secs() / 60))??;
+        .map_err(|_| anyhow!("the Claude session did not answer within {} minutes", limit.as_secs() / 60))??;
         Ok(answer)
     }
 
@@ -265,6 +327,29 @@ struct Opener {
     joiner_tokens: HashMap<String, u64>,
     token_budget: u64,
     state: watch::Sender<RoomState>,
+    /// Peers that reported a usage limit in this room.
+    limited: HashSet<String>,
+    /// Packages of the latest SPLIT_WORK proposal: owner id and title.
+    split: Option<Vec<(String, String)>>,
+    has_project: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PkgState {
+    Open,
+    Running,
+    Done,
+    Blocked,
+}
+
+struct Pkg {
+    id: u32,
+    owner: String,
+    title: String,
+    branch: String,
+    state: PkgState,
+    /// Name of the peer that started the package, after a handover.
+    taken_from: Option<String>,
 }
 
 /// Runs a room from invitation to result. Returns the text for the human who asked.
@@ -299,7 +384,7 @@ pub async fn run_opener(
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
     let session = Session::start(&work_dir, &me.name, &others, "full")?;
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
-    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state };
+    let mut room = Opener { shared, room_id, me, joiners, log: vec![], seen: 0, budget, rx, session, dir, joiner_tokens: HashMap::new(), token_budget, state, limited: HashSet::new(), split: None, has_project: project.is_some() };
 
     let brief_topic = match &project {
         Some((url, d)) => format!("{topic}\nProject: {url}. You are in its local clone at {}.", d.display()),
@@ -369,19 +454,39 @@ and where relevant information can be found. This one message needs no kind on t
             }
             let (kind, text) = if speaker.id == self.me.id {
                 let left = self.budget[&speaker.id];
-                let reply = self.own_turn(&format!("Your turn ({left} turns left).")).await?;
-                proto::parse_kind(&reply, "PROPOSAL", &KINDS)
+                match self.own_turn(&format!("Your turn ({left} turns left).")).await {
+                    Ok(reply) => proto::parse_kind(&reply, "PROPOSAL", &KINDS),
+                    Err(e) if is_limit(&e) => ("LIMIT".to_string(), "usage limit reached".to_string()),
+                    Err(e) => return Err(e),
+                }
             } else {
                 self.wait_say(&speaker.id).await?
             };
             *self.budget.get_mut(&speaker.id).unwrap() -= 1;
+            match kind.as_str() {
+                // A peer at its usage limit takes no further turns.
+                "LIMIT" => {
+                    self.limited.insert(speaker.id.clone());
+                    self.budget.insert(speaker.id.clone(), 0);
+                }
+                "SPLIT_WORK" => {
+                    let names: Vec<String> = order.iter().map(|p| p.name.clone()).collect();
+                    let found = proto::parse_packages(&text, &names);
+                    self.split = if found.is_empty() { None } else { Some(found.into_iter().map(|(i, t)| (order[i].id.clone(), t)).collect()) };
+                }
+                "PROPOSAL" => self.split = None,
+                _ => {}
+            }
             let next = self.next_speaker(&order, idx);
             last_kind.insert(speaker.id.clone(), kind.clone());
+            let active: Vec<&Participant> = order.iter().filter(|p| !self.limited.contains(&p.id)).collect();
             let mut done = if kind == "NEED_HUMAN" {
                 Some("a human has to decide")
-            } else if order.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "CONSENSUS")) {
+            } else if active.len() < 2 {
+                Some("a peer reached its usage limit")
+            } else if active.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "CONSENSUS")) {
                 Some("consensus")
-            } else if order.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "PASS" || k == "CONSENSUS")) {
+            } else if active.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "PASS" || k == "CONSENSUS")) {
                 Some("nothing left to add")
             } else {
                 None
@@ -400,13 +505,165 @@ and where relevant information can be found. This one message needs no kind on t
             }
         };
 
-        let ask = if reason == "consensus" {
+        // If the peers agreed on a split, they now do the work.
+        let mut reason = reason.to_string();
+        if reason == "consensus" {
+            if let Some(split) = self.split.clone() {
+                reason = self.work_phase(split).await?;
+            }
+        }
+        let ask = if reason.starts_with("work") {
+            "The work phase is over. Write the result for the human who asked: per package what was done and on which branch, what is blocked or left, and how to review and merge it. No kind on the first line."
+        } else if reason == "consensus" {
             "The room reached consensus. Write the agreed result for the human who asked: complete and usable on its own. No kind on the first line."
         } else {
             "The room closes without consensus. Write an overview for the human who asked with three parts: agreed, disputed, and what the human has to decide. No kind on the first line."
         };
-        let result = self.own_turn(ask).await?;
-        Ok((reason.to_string(), result))
+        let result = match self.own_turn(ask).await {
+            Ok(r) => r,
+            // Without capacity left there is no model to write the summary.
+            Err(e) if is_limit(&e) => self.plain_overview(),
+            Err(e) => return Err(e),
+        };
+        Ok((reason, result))
+    }
+
+    /// The last message of every peer, for when our own session cannot summarize.
+    fn plain_overview(&self) -> String {
+        let mut out = String::from("This machine's session is at its usage limit, so this overview was assembled without a model. Last message of each peer:\n");
+        let mut order = self.joiners.clone();
+        order.push(self.me.clone());
+        for p in order {
+            if let Some(e) = self.log.iter().rev().find(|e| e.from == p.id && e.kind != "HUMAN") {
+                out.push_str(&format!("\n{}", render(e)));
+            }
+        }
+        out
+    }
+
+    fn participant(&self, id: &str) -> Participant {
+        self.joiners.iter().find(|j| j.id == id).cloned().unwrap_or_else(|| self.me.clone())
+    }
+
+    fn at_limit(&self, id: &str) -> bool {
+        self.limited.contains(id) || self.shared.capacity_of(id).is_some_and(|c| c.limited)
+    }
+
+    /// Gives package `i` to the peer with capacity that has the least to do.
+    fn reassign(&mut self, pkgs: &mut [Pkg], i: usize, why: &str) {
+        let old = self.participant(&pkgs[i].owner);
+        let mut all = self.joiners.clone();
+        all.push(self.me.clone());
+        let load = |id: &str| pkgs.iter().filter(|p| p.owner == id && matches!(p.state, PkgState::Open | PkgState::Running)).count();
+        let taker = all.iter().filter(|p| p.id != old.id && !self.at_limit(&p.id)).min_by_key(|p| load(&p.id)).cloned();
+        let me = self.me.clone();
+        match taker {
+            Some(t) => {
+                pkgs[i].owner = t.id.clone();
+                pkgs[i].taken_from = Some(old.name.clone());
+                pkgs[i].state = PkgState::Open;
+                self.publish(&me, "HANDOVER", &format!("#{} {} goes from {} to {}: {} {why}. Branch: {}", pkgs[i].id, pkgs[i].title, old.name, t.name, old.name, pkgs[i].branch), None);
+            }
+            None => {
+                pkgs[i].state = PkgState::Blocked;
+                self.publish(&me, "BLOCKED", &format!("#{} {}: {} {why} and no other peer has capacity left.", pkgs[i].id, pkgs[i].title, old.name), None);
+            }
+        }
+    }
+
+    /// The peers work on the agreed packages at the same time, each on its own
+    /// branch. A package whose owner reaches its usage limit moves to another peer.
+    async fn work_phase(&mut self, split: Vec<(String, String)>) -> Result<String> {
+        let mut pkgs: Vec<Pkg> = split
+            .into_iter()
+            .enumerate()
+            .map(|(i, (owner, title))| {
+                let branch = format!("agora/{}/{}", self.room_id, self.participant(&owner).name.to_lowercase());
+                Pkg { id: i as u32 + 1, owner, title, branch, state: PkgState::Open, taken_from: None }
+            })
+            .collect();
+        let list = pkgs.iter().map(|p| format!("#{} {}: {} (branch {})", p.id, self.participant(&p.owner).name, p.title, p.branch)).collect::<Vec<_>>().join("\n");
+        let me = self.me.clone();
+        self.publish(&me, "WORK", &format!("Work phase. Packages:\n{list}"), None);
+        self.session.timeout = WORK_TIMEOUT;
+        loop {
+            for i in 0..pkgs.len() {
+                if pkgs[i].state == PkgState::Open && self.at_limit(&pkgs[i].owner) {
+                    self.reassign(&mut pkgs, i, "is at its usage limit");
+                }
+            }
+            // Start one package per idle peer.
+            let mut mine = None;
+            for i in 0..pkgs.len() {
+                let owner = pkgs[i].owner.clone();
+                if pkgs[i].state != PkgState::Open || pkgs.iter().any(|p| p.owner == owner && p.state == PkgState::Running) {
+                    continue;
+                }
+                pkgs[i].state = PkgState::Running;
+                if owner == self.me.id {
+                    mine = Some(i);
+                } else {
+                    let p = &pkgs[i];
+                    let work = Msg::Work { room_id: self.room_id.clone(), package: p.id, title: p.title.clone(), branch: p.branch.clone(), taken_from: p.taken_from.clone() };
+                    self.shared.send_to(&owner, work);
+                }
+            }
+            if !pkgs.iter().any(|p| p.state == PkgState::Running) {
+                break;
+            }
+            let (i, kind, text) = if let Some(i) = mine {
+                let prompt = work_prompt(pkgs[i].id, &pkgs[i].title, &pkgs[i].branch, pkgs[i].taken_from.as_deref(), self.has_project);
+                match self.own_turn(&prompt).await {
+                    Ok(reply) => {
+                        let (kind, text) = proto::parse_kind(&reply, "DONE", &["DONE", "BLOCKED"]);
+                        (i, kind, text)
+                    }
+                    Err(e) if is_limit(&e) => (i, "LIMIT".to_string(), "usage limit reached".to_string()),
+                    Err(e) => return Err(e),
+                }
+            } else {
+                let (peer, id, kind, text) = self.wait_report().await?;
+                match pkgs.iter().position(|p| p.id == id && p.owner == peer && p.state == PkgState::Running) {
+                    Some(i) => (i, kind, text),
+                    None => continue,
+                }
+            };
+            let owner = self.participant(&pkgs[i].owner);
+            let head = format!("#{} {}", pkgs[i].id, pkgs[i].title);
+            match kind.as_str() {
+                "LIMIT" => {
+                    self.limited.insert(owner.id.clone());
+                    self.publish(&owner, "LIMIT", &format!("{head}: {text}"), None);
+                    self.reassign(&mut pkgs, i, "reached its usage limit");
+                }
+                "BLOCKED" => {
+                    pkgs[i].state = PkgState::Blocked;
+                    self.publish(&owner, "BLOCKED", &format!("{head}\n{text}"), None);
+                }
+                _ => {
+                    pkgs[i].state = PkgState::Done;
+                    self.publish(&owner, "DONE", &format!("{head}\n{text}"), None);
+                }
+            }
+        }
+        self.session.timeout = TURN_TIMEOUT;
+        let all_done = pkgs.iter().all(|p| p.state == PkgState::Done);
+        Ok(if all_done { "work finished" } else { "work finished with open packages" }.to_string())
+    }
+
+    /// Waits for a joiner's report on a work package.
+    async fn wait_report(&mut self) -> Result<(String, u32, String, String)> {
+        loop {
+            let ev = tokio::time::timeout(WORK_TIMEOUT, self.rx.recv()).await.map_err(|_| anyhow!("a peer did not report on its package within {} minutes", WORK_TIMEOUT.as_secs() / 60))?;
+            match ev {
+                Some(RoomEvent::Remote(p, Msg::Say { kind, text, tokens, package: Some(id), .. })) if kind != "HUMAN" => {
+                    self.joiner_tokens.insert(p.clone(), tokens);
+                    return Ok((p, id, kind, text));
+                }
+                Some(ev) => self.side_event(ev)?,
+                None => bail!("room stopped"),
+            }
+        }
     }
 
     fn total_tokens(&self) -> u64 {
@@ -506,7 +763,11 @@ and where relevant information can be found. This one message needs no kind on t
         self.drain()?;
         let news: String = self.log[self.seen..].iter().filter(|e| e.from != self.me.id || e.kind == "HUMAN").map(render).collect::<Vec<_>>().join("\n");
         self.seen = self.log.len();
-        let reply = self.session.turn(&format!("{news}\n{ask}")).await?;
+        let reply = self.session.turn(&format!("{news}\n{ask}")).await;
+        if let Some(c) = self.session.capacity {
+            self.shared.report_capacity(c);
+        }
+        let reply = reply?;
         // Our own answer becomes the next log entry; the session already knows it.
         self.seen = self.log.len() + 1;
         Ok(reply)
@@ -581,6 +842,7 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
         (Some(url), None) => format!("\nProject: {url}. This machine has no registered clone of it, so you cannot look at its files; say so."),
         _ => String::new(),
     };
+    let has_clone = clone.is_some();
     let work_dir = clone.unwrap_or_else(|| dir.clone());
     let mut session = match Session::start(&work_dir, &my_name, &others, &invite.rights) {
         Ok(s) => s,
@@ -614,22 +876,46 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
                 };
                 let prompt = format!("{}\n{ask}", news.iter().map(render).collect::<Vec<_>>().join("\n"));
                 news.clear();
-                let reply = match session.turn(&prompt).await {
+                let turn = session.turn(&prompt).await;
+                if let Some(c) = session.capacity {
+                    shared.report_capacity(c);
+                }
+                let reply = match turn {
                     Ok(r) => r,
+                    Err(e) if is_limit(&e) => {
+                        let limit = Msg::Say { room_id: invite.room_id.clone(), kind: "LIMIT".into(), text: "usage limit reached".into(), tokens: session.tokens(), extra_turns: 0, package: None };
+                        shared.send_to(&invite.from, limit);
+                        continue;
+                    }
                     Err(e) => {
                         shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: e.to_string() });
                         break Err(e);
                     }
                 };
                 let (kind, text) = if briefing { proto::parse_kind(&reply, "KNOWN_MISSING", &["KNOWN_MISSING"]) } else { proto::parse_kind(&reply, "PROPOSAL", &KINDS) };
-                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind, text, tokens: session.tokens(), extra_turns: 0 });
+                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind, text, tokens: session.tokens(), extra_turns: 0, package: None });
+            }
+            Some(RoomEvent::Remote(p, Msg::Work { package, title, branch, taken_from, .. })) if p == invite.from => {
+                session.timeout = WORK_TIMEOUT;
+                let prompt = format!("{}\n{}", news.iter().map(render).collect::<Vec<_>>().join("\n"), work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone));
+                news.clear();
+                let turn = session.turn(&prompt).await;
+                if let Some(c) = session.capacity {
+                    shared.report_capacity(c);
+                }
+                let (kind, text) = match turn {
+                    Ok(r) => proto::parse_kind(&r, "DONE", &["DONE", "BLOCKED"]),
+                    Err(e) if is_limit(&e) => ("LIMIT".to_string(), "usage limit reached".to_string()),
+                    Err(e) => ("BLOCKED".to_string(), format!("the session failed: {e}")),
+                };
+                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind, text, tokens: session.tokens(), extra_turns: 0, package: Some(package) });
             }
             Some(RoomEvent::Remote(p, Msg::RoomClose { reason, result, .. })) if p == invite.from => {
                 std::fs::write(dir.join("result.md"), &result)?;
                 break Ok(reason);
             }
             Some(RoomEvent::Human(text, extra_turns)) => {
-                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind: "HUMAN".into(), text, tokens: session.tokens(), extra_turns });
+                shared.send_to(&invite.from, Msg::Say { room_id: invite.room_id.clone(), kind: "HUMAN".into(), text, tokens: session.tokens(), extra_turns, package: None });
             }
             Some(RoomEvent::Panic) | None => {
                 shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: "stopped on the peer's machine".into() });

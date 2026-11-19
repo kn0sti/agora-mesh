@@ -102,11 +102,36 @@ ROOM6B="$(ls -t "$T/a/rooms" | head -1)"
 check "without a project the session runs in the room directory" 'grep -q "cwd=$ROOM6B" "$T/a/rooms/$ROOM6B/log.md"'
 check "agora stats lists the rooms on both sides" 'a stats | grep -q "^$ROOM6 *opened" && b stats | grep -q "^$ROOM6 *joined"'
 
+# 7. An agreed split starts the work phase: every peer works on its package.
+export FAKE_SPLIT=1; restart
+(cd "$T/repoA" && a discuss "Build it" --with Heimserver --turns 3 > "$T/out7" 2>&1)
+ROOM7="$(ls -t "$T/a/rooms" | head -1)"
+LOG7="$T/a/rooms/$ROOM7/log.md"
+check "a consensus on SPLIT_WORK starts the work phase" 'grep -q "closed: work finished;" "$T/out7" && grep -q "WORKRESULT" "$T/out7"'
+check "each peer reports its own package" 'grep -q "Heimserver · DONE" "$LOG7" && grep -q "Mac · DONE" "$LOG7"'
+check "each package gets a branch per peer" 'grep -q "branch agora/$ROOM7/heimserver" "$LOG7" && grep -q "branch agora/$ROOM7/mac" "$LOG7"'
+check "the joiner worked in its own clone" 'grep -A2 "Heimserver · DONE" "$LOG7" | grep -q "cwd=repoB"'
+check "agora status shows each peer's capacity" 'a status | grep -q "Heimserver.*42 % of its limit used" && b status | grep -q "Mac.*42 % of its limit used"'
+
+# 8. A peer that reaches its usage limit hands its package to a peer with capacity.
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null
+export FAKE_LIMIT=1; b status >/dev/null; unset FAKE_LIMIT
+wait_for 40 'a status | grep -q "Heimserver *online"'
+(cd "$T/repoA" && a discuss "Build it again" --with Heimserver --turns 3 > "$T/out8" 2>&1)
+ROOM8="$(ls -t "$T/a/rooms" | head -1)"
+LOG8="$T/a/rooms/$ROOM8/log.md"
+check "the peer at its limit reports it" 'grep -q "Heimserver · LIMIT" "$LOG8"'
+check "its package is handed over, branch included" 'grep -A1 "Mac · HANDOVER" "$LOG8" | grep -q "frontend goes from Heimserver to Mac.*Branch: agora/$ROOM8/heimserver"'
+check "the taker finishes both packages" '[ "$(grep -c "Mac · DONE" "$LOG8")" = 2 ] && grep -q "closed: work finished;" "$T/out8"'
+check "the peer is shown at its limit afterwards" 'a status | grep -q "Heimserver.*at its usage limit"'
+
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
+  [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }
 fi
 exit "$fail"
