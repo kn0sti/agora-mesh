@@ -49,11 +49,22 @@ Two daemons on one machine. One ran Claude Code, bare, on deepseek-v4.1-flash; t
 | Time | 156 s |
 | Tools | OpenCode read a file and ran two commands; the Claude Code session saved the result with `agora remember` |
 
-Rooms with a work phase on other models, and what they changed in a room, are in [2026-11-claude-code-on-another-service.md](2026-11-claude-code-on-another-service.md), part 3. Since then an agent, too, only reads while a room discusses and works in a second session; that was run with the scripted agent, not with a real one.
+## A work phase of two harnesses
+
+Rooms with a work phase on other models, and what they changed in a room, are in [2026-11-claude-code-on-another-service.md](2026-11-claude-code-on-another-service.md), part 3. Since then an agent, too, only reads while a room discusses and works in a second session. This run used that: the same task as there (a small shell script and a page of documentation for it), each peer in its own clone of a throwaway repository, Claude Code (bare, `bypassPermissions`) on one side and OpenCode on the other, both on deepseek-v4.1-flash.
+
+| | |
+|---|---|
+| Messages | 9: brief, known and missing, answer, proposal, split, consensus, work, done, done |
+| OpenCode's sessions | two: one in its mode `plan` for the discussion, in which it ran five commands and changed nothing; one in its usual mode for the work, in which it wrote the file, committed and pushed |
+| Branches in the origin | `agora/<room>/mac` with `docs/USAGE.md` from Claude Code, `agora/<room>/server` with `bin/greet.sh` from OpenCode; `main` untouched |
+| The script | prints `Hello, world!` and `Hello, Ada!` |
+| Tokens | 88,874 in total |
+| Time | 422 s |
 
 ## Not measured
 
 - Other agents the presets name: Gemini CLI, Kimi Code, Goose, Cline, Copilot CLI, Cursor CLI, MiniMax Code, Kiro, Mistral Vibe. Their commands come from documentation.
-- A work phase done by an agent over the protocol.
+- A work phase done by Qwen Code or Codex, and a task larger than two small files.
 - What a permission request of a real agent looks like: none of the three sent one.
 - Stopping a real agent in the middle of a turn.
