@@ -18,10 +18,10 @@ This document describes agora-mesh as it is built. What is planned but missing i
 |---|---|
 | `agora` daemon | One per machine. Holds the identity key, the links to peers, the rooms and the shared memory. Starts and feeds room sessions. |
 | `agora` command | Thin client. It talks to the local daemon over TCP on 127.0.0.1, with a token that only the user can read, and starts the daemon if it is not running. |
-| Room session | A headless `claude -p` process the daemon starts for one room. |
+| Room session | An agent process the daemon starts for one room: Claude Code in its headless mode, or an agent that speaks the Agent Client Protocol (section 5, "Harness profiles"). |
 | Plugin | The Claude Code plugin in this repository: a launcher for the command, a skill, a hook and a monitor (section 10). |
 
-One Rust binary is both daemon and command. Source: `src/main.rs` (command), `daemon.rs` (links, control socket, commands), `room.rs` (rooms and sessions), `proto.rs` (messages), `memory.rs` (shared memory), `project.rs` (git remotes), `state.rs` (persistent state).
+One Rust binary is both daemon and command. Source: `src/main.rs` (command), `daemon.rs` (links, control socket, commands), `room.rs` (rooms), `session.rs` (sessions, for both kinds of program), `harness.rs` (profiles and presets), `proto.rs` (messages), `memory.rs` (shared memory), `project.rs` (git remotes), `state.rs` (persistent state).
 
 ### Files
 
@@ -31,6 +31,7 @@ Everything lives under `~/.agora/` (`AGORA_HOME` names another directory, which 
 |---|---|
 | `state.json` | peer name, secret key, networks and their peers, registered projects, block list, settings; readable by the user only |
 | `daemon.json`, `daemon.log` | port and token of the running daemon; its log |
+| `harness.toml` | this machine's harness profiles and which one is the default (section 5) |
 | `events.log` | one line per event (section 8) |
 | `rooms/<id>/` | `log.md`, `result.md`, `closing.md`, `stats.json`, `timeline.tsv`, `members` of one room; removed 30 days after the last change |
 | `shared/<network>/` | the shared memory of a network (section 8) |
@@ -43,6 +44,7 @@ Everything lives under `~/.agora/` (`AGORA_HOME` names another directory, which 
 | `AGORA_HOME` | data directory |
 | `AGORA_CLAUDE` | the `claude` executable to start for sessions |
 | `AGORA_CLAUDE_ARGS` | further arguments for every session, for example `--model sonnet` |
+| `AGORA_HARNESS` | the harness profile sessions run on, instead of the default in `harness.toml` |
 | `AGORA_PERMISSION_MODE` | permission mode of sessions with full rights; default `auto` |
 | `AGORA_LIMIT_AT` | utilization from which a peer counts as limited; default `0.97` |
 | `AGORA_BIN`, `AGORA_RELEASE_BASE` | launcher only: use this binary, or download from this base URL |
@@ -158,6 +160,58 @@ Messages from peers are written to its standard input as user messages: one line
 - **Model.** `--model <name>` on `agora discuss`, `ask` and `delegate` travels in the invitation, and every session of that room is started with it. Without it each machine uses its own default. A name from a peer must look like a model name before it becomes an argument of `claude`. `stats.json` records the model each session reports.
 - **Streaming input** is documented for the Agent SDK only; with the command line it works as of Claude Code 2.1.328 and may change.
 
+### Harness profiles
+
+Which program a session runs in, and which model service that program talks to, is a **profile** on each machine. Profiles live in `harness.toml`; `agora harness add|list|presets|remove|default|test` edit and try them. A session uses the profile named with `--harness` on `agora discuss` (the opener's own session only), else `AGORA_HARNESS`, else the file's default, else `claude`: Claude Code as it is installed. A joiner always uses its own default, because only that machine knows what is installed and logged in there.
+
+```toml
+default = "deepseek"
+
+[profile.deepseek]
+kind = "claude"
+external = true
+
+[profile.deepseek.env]
+ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+ANTHROPIC_AUTH_TOKEN = "file:~/.keys/deepseek"
+ANTHROPIC_MODEL = "deepseek-flash[1m]"
+
+[profile.opencode]
+kind = "acp"
+command = ["opencode", "acp"]
+external = true
+```
+
+A value `env:NAME`, `file:PATH` or `cmd:COMMAND` in `env` is looked up when a session starts, so the file holds no key; `agora harness add` refuses a key in place of its source. Peers are told a profile's name, kind, model and whether it is external, nothing else.
+
+**Kind `claude`** is the session described above, with the profile's program, environment and permission mode. Three rules apply when the profile names another address (`ANTHROPIC_BASE_URL`):
+
+- `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are taken from the profile only. One that the daemon's environment happens to hold is not passed on.
+- The room's `--model` is not used; it names a Claude model. The room's log notes that the peer keeps its own.
+- The permission mode stays `auto` unless the profile names one. Claude Code cannot run the safety check of `auto` there, so a session with full rights can read and run harmless commands and is refused the rest ([measured](docs/measurements/2026-11-claude-code-on-another-service.md)). A profile with `permission_mode = "bypassPermissions"` works, unchecked.
+
+**Kind `acp`** drives an agent over the Agent Client Protocol, version 1: JSON-RPC 2.0, one message per line, on the agent's standard input and output.
+
+1. `initialize` with protocol version 1 and without the client's file-system and terminal capabilities, so the agent uses its own tools. A request for them is answered with "method not found".
+2. `session/new` with the working directory and no MCP servers.
+3. The profile's `model` is set with `session/set_config_option`, if the agent offers a model option with a value of that name. A mode the profile names for the room's rights (`modes`) is set the same way, or with `session/set_mode`; if that fails, the session does not start.
+4. The rules of the room are sent once, in front of the first message.
+5. `session/prompt` per turn. The contribution is the text the agent sent after its last tool call in that turn.
+6. `session/request_permission` is answered from the rights: refuse for `talk`, allow tools of the kinds `read`, `search` and `think` for `read`, allow for `full`. The option is chosen by its kind, never by its label. An agent's own reading tools usually do not ask, so `talk` and `read` are only as strict as the agent.
+7. Stopping a turn kills the agent's process group, as for Claude Code.
+
+**What a harness reports** decides what the room can do with it:
+
+| | Claude Code on Anthropic | Claude Code on another service | Agent over the protocol |
+|---|---|---|---|
+| Tokens per turn | yes | yes, as the service counts them | the protocol's draft field if the agent fills it, else the context size it reports, else an estimate from text length; `stats.json` says `tokens_estimated` |
+| How full the usage limit is | yes | no | no |
+| "Limit reached" | status 429 or the usual wording | the same | the usual wording in the agent's error |
+
+A peer that reports no usage limit shows "its harness reports no usage limit" in `agora peers`; work is not moved away from it in advance, and a limit error still hands its package to another peer.
+
+**External.** A profile whose prompts go to a service other than Anthropic's or the machine itself is marked `external`. In a directory with a file `.agora/no-external`, or below one, sessions of such a profile do not start: the opener's `agora discuss` fails before anyone is invited, and a joiner declines the room with that reason. This guards a project on the machine that holds the file. It does not stop a room's messages from reaching an external peer elsewhere.
+
 ## 6. Splitting work
 
 **Capacity.** Claude Code prints a `rate_limit_event` with every turn: the utilization of the five-hour and the seven-day window and when each resets. The daemon keeps the tighter of the two as the peer's capacity, sends it to all peers (`STATUS`) and shows it in `agora status` and `agora peers`. A peer counts as limited when the event's status is not `allowed`, when utilization reaches 97 %, or when a turn fails with a limit error.
@@ -236,7 +290,7 @@ Messages are authenticated by the QUIC connection: a link belongs to exactly one
 | `MEMBERS` | `network`, `members`, `version` | the member list; a peer missing from a newer one has been revoked |
 | `HEARTBEAT` | | keep-alive |
 | `STATUS` | `capacity` | utilization, reset time, limited or not |
-| `BUSY` | `rooms` | how many rooms the sender is working on |
+| `BUSY` | `rooms`, `harness` | how many rooms the sender is working on, and which harness profile its sessions run on |
 | `ROOM_INVITE` | `room_id`, `topic`, `turn_budget`, `token_budget`, `project`, `participants`, `mode`, `catch_up`, `seq`, `lean` | invite into a room, or ask a question, or hand over a task |
 | `ROOM_JOIN`, `ROOM_DECLINE` | `room_id`, `reason` | answer; a decline during a room means the peer leaves |
 | `SAY` | `room_id`, `kind`, `text`, `tokens`, `extra_turns`, `package`, `n` | joiner to opener: a contribution, a human's message, or a report on a package |
@@ -295,8 +349,11 @@ Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, 
 | A protocol version, and signatures on room messages | peers must run compatible versions; room messages rely on the authenticated link |
 | Replication that sends only what the other side lacks | everything is sent when a link comes up, which is fine for a few hundred short entries |
 | Profiles for one's own and other people's machines | level and rights are set per peer by hand |
-| Peers that are not Claude Code | a session is "text in, text out", so other command-line agents could be attached |
+| Adapters of their own for Codex and Pi | both offer more than the Agent Client Protocol carries: Codex a real usage-limit signal, Pi the smallest start; see [docs/design/other-harnesses.md](docs/design/other-harnesses.md) |
+| Several participants on one machine | one machine brings one session into a room; a strong and a cheap model side by side need two machines today |
+| Telling each session which harness the others run on | the rules of a room call the others "coding agents"; `agora peers` shows the harness to the human |
+| Lean start switches per agent | a Claude Code session is started without connectors and with only the tools it needs; for agents over the protocol only the connectors are left out |
 
-Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts.
+Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts; a session on a real model service other than Anthropic's; a real agent over the Agent Client Protocol.
 
 Known weak spots: a peer that is a member of two networks shared with the same peer uses one link, and member lists of the second network do not travel over it. An approved peer can still fill another peer's shared memory or its room queue; approval is the boundary, not a quota.

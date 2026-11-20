@@ -1,6 +1,6 @@
 # Design: peers on other harnesses and other models
 
-Status: plan, nothing of it is built. Researched on 2026-11-20.
+Status: steps 1 to 3 of section 5 are built; section 11 says what came out differently. Steps 4 and 5 are not built. Researched on 2026-11-20.
 
 Today every peer runs Claude Code on a Claude model. This plan lets a peer run another coding agent (Codex, OpenCode, Gemini CLI, Qwen Code, Kimi Code, and others) or run on another model (DeepSeek, GLM, Kimi, Qwen, MiniMax, a local model), without giving up what makes a room cheap: sessions that start lean and stay alive.
 
@@ -239,3 +239,19 @@ Because of the last point, a profile whose backend is outside the user's control
 1. TOML for the profile file adds a dependency; JSON would not. TOML is easier to read and to correct by hand.
 2. Should a room's opener be able to require capabilities, for example "only peers that report tokens"?
 3. Whether presets should be fetched from the repository at run time, so that a changed endpoint does not need a new release. It would add a network request and a trust question.
+
+## 11. What was built, and what came out differently
+
+Steps 1 to 3: the session interface (`src/session.rs`), profiles and presets (`src/harness.rs`, `agora harness`), and the adapter for the Agent Client Protocol. How it works now is in ARCHITECTURE.md, section 5, "Harness profiles".
+
+- **The profile file** has a table `[profile.<name>]` per profile instead of one at the top level, so that a profile's name cannot collide with a setting.
+- **Rules of the room** go in front of the first message for every agent. The protocol's client system prompt is not used yet.
+- **Modes.** No preset sets an agent's mode. The rights are enforced by answering permission requests; a profile can name the agent's own mode per rights level in `modes`, and then failing to set it stops the session.
+- **Tokens.** The draft field is read as a running total of the session, as its schema describes it; an agent that counts per turn is recognised only when its number goes down.
+- **Stopping a turn** kills the agent's process group right away. `session/cancel` is not sent first, because the session is not used again after a stop.
+- **Permission mode on another model service.** Found by running the real Claude Code against a local stand-in: `auto` cannot run its safety check there ([measurement](../measurements/2026-11-claude-code-on-another-service.md)). Presets therefore set no mode, `agora harness add` explains the consequence, and `--permission-mode` is the user's decision.
+- **Credentials.** A session whose profile names another address gets `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from the profile only.
+- **Presets** exist for the providers and agents of section 3 whose variables or commands the research confirmed. Xiaomi, Volcengine, StepFun and Tencent are reachable through `anthropic-compatible`.
+- **Not done from steps 1 to 3:** the rules do not name each peer's harness; `agora bench --harness` measures, but no preset carries lean start switches for an agent; the opener cannot require capabilities.
+
+Verified with real programs: Claude Code 2.1.329 on a profile, against a stand-in service. Verified with scripted stand-ins only: everything about the Agent Client Protocol, and rooms that mix harnesses. Not run at all: any real model service, any real agent.

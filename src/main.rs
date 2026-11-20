@@ -1,10 +1,12 @@
 //! `agora` — command and daemon of agora-mesh. See ARCHITECTURE.md.
 
 mod daemon;
+mod harness;
 mod memory;
 mod project;
 mod proto;
 mod room;
+mod session;
 mod state;
 
 use std::collections::HashMap;
@@ -96,6 +98,9 @@ enum Cmd {
         /// Model for every session of the room, for example fable; default: each machine's own
         #[arg(long, default_value = "")]
         model: String,
+        /// Harness profile for this machine's session; default: see `agora harness list`
+        #[arg(long, default_value = "")]
+        harness: String,
     },
     /// Invite another peer into a running room you opened
     Invite { room: String, name: String },
@@ -176,8 +181,17 @@ enum Cmd {
     },
     /// Token use of the rooms this machine took part in
     Stats,
-    /// Measure the fixed context of a session on this machine (uses real Claude sessions)
-    Bench,
+    /// Measure the fixed context of a session on this machine (uses real sessions)
+    Bench {
+        /// Harness profile to measure; default: this machine's
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// The programs and model services this machine's sessions can run on
+    Harness {
+        #[command(subcommand)]
+        action: Option<HarnessCmd>,
+    },
     /// Wait for the result of a room that paused for a human
     Wait { room: String },
     /// List running rooms and open invitations
@@ -220,6 +234,48 @@ enum BlockCmd {
 }
 
 #[derive(Subcommand)]
+enum HarnessCmd {
+    /// List this machine's profiles
+    List,
+    /// List the presets `add` knows
+    Presets,
+    /// Add a profile from a preset, for example `agora harness add deepseek --key env:DEEPSEEK_API_KEY`
+    Add {
+        preset: String,
+        /// Name of the profile; default: the preset's name
+        #[arg(long)]
+        name: Option<String>,
+        /// Where the key comes from: env:NAME, file:PATH or "cmd:COMMAND". For an agent: VARIABLE=SOURCE
+        #[arg(long)]
+        key: Option<String>,
+        /// Address of the model service, where the preset has none
+        #[arg(long)]
+        url: Option<String>,
+        /// Model to use instead of the preset's
+        #[arg(long)]
+        model: Option<String>,
+        /// Model for small background tasks; default: the preset's, or --model
+        #[arg(long)]
+        small_model: Option<String>,
+        /// For the preset `acp`: the agent's command, for example "opencode acp"
+        #[arg(long)]
+        command: Option<String>,
+        /// Claude Code's permission mode for sessions that may work; default: auto
+        #[arg(long)]
+        permission_mode: Option<String>,
+        /// The agent's model runs on this machine, so the profile is not external
+        #[arg(long)]
+        local: bool,
+    },
+    /// Remove a profile
+    Remove { name: String },
+    /// Make a profile the one this machine's sessions use
+    Default { name: String },
+    /// Run two turns on a profile and report what works (uses a real session)
+    Test { name: Option<String> },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     /// Register a clone; default: the repository you are in
     Add { path: Option<String> },
@@ -245,7 +301,7 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean, model } => call(
+        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean, model, harness } => call(
             "discuss",
             &[
                 ("topic", topic),
@@ -256,6 +312,7 @@ fn main() -> Result<()> {
                 ("remember", remember),
                 ("lean", if lean { "1".into() } else { String::new() }),
                 ("model", model),
+                ("harness", harness),
                 ("cwd", cwd()),
             ],
         ),
@@ -287,11 +344,12 @@ fn main() -> Result<()> {
             ProjectCmd::Remove { path } => call("project", &[("action", "remove".into()), ("path", path)]),
         },
         Cmd::Stats => stats(),
-        Cmd::Bench => {
-            say!("Measuring with real Claude sessions on the smallest model; this takes about a minute.");
-            say!("{}", tokio::runtime::Runtime::new()?.block_on(room::bench())?);
+        Cmd::Bench { harness } => {
+            say!("Measuring with real sessions; this takes about a minute.");
+            say!("{}", tokio::runtime::Runtime::new()?.block_on(session::bench(harness.as_deref()))?);
             Ok(())
         }
+        Cmd::Harness { action } => harness_cmd(action.unwrap_or(HarnessCmd::List)),
         Cmd::Wait { room } => call("wait", &[("room", room)]),
         Cmd::Trust { name, level, rights } => call("trust", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Rooms => call("rooms", &[]),
@@ -301,6 +359,36 @@ fn main() -> Result<()> {
         Cmd::Panic => call("panic", &[]),
         Cmd::Watch { room } => watch(&room),
     }
+}
+
+fn harness_cmd(action: HarnessCmd) -> Result<()> {
+    match action {
+        HarnessCmd::List => say!("{}", harness::list()?),
+        HarnessCmd::Presets => say!("{}", harness::presets()),
+        HarnessCmd::Add { preset, name, key, url, model, small_model, command, permission_mode, local } => {
+            let found = harness::PRESETS.iter().find(|p| p.name == preset).ok_or_else(|| anyhow!("no preset named \"{preset}\"; see `agora harness presets`"))?;
+            let (name, profile, notes) = harness::build(found, &harness::AddOptions { name, key, url, model, small_model, command, permission_mode, local })?;
+            harness::add(&name, profile)?;
+            say!("Added the harness profile \"{name}\" to {}.", harness::path().display());
+            for note in notes {
+                say!("{note}");
+            }
+            say!("Try it with `agora harness test {name}`; make it this machine's with `agora harness default {name}`.");
+        }
+        HarnessCmd::Remove { name } => {
+            harness::remove(&name)?;
+            say!("Removed the harness profile \"{name}\".");
+        }
+        HarnessCmd::Default { name } => {
+            harness::set_default(&name)?;
+            say!("Sessions on this machine now run on \"{name}\". Rooms that are already running keep theirs.");
+        }
+        HarnessCmd::Test { name } => {
+            say!("Running two turns with a real session.");
+            say!("{}", tokio::runtime::Runtime::new()?.block_on(session::try_out(name.as_deref()))?);
+        }
+    }
+    Ok(())
 }
 
 fn setup(name: &str) -> Result<()> {

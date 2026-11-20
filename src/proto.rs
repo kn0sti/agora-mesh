@@ -108,7 +108,12 @@ pub enum Msg {
     MemPut { entry: crate::memory::MemEntry },
     /// How many rooms, questions and tasks a peer is working on right now.
     #[serde(rename = "BUSY")]
-    Busy { rooms: u32 },
+    Busy {
+        rooms: u32,
+        /// The program its sessions run in; a peer that does not say is on Claude Code.
+        #[serde(default)]
+        harness: Option<Harness>,
+    },
     /// How much of its usage limit a peer has used.
     #[serde(rename = "STATUS")]
     Status { capacity: Capacity },
@@ -123,6 +128,30 @@ pub enum Msg {
 pub struct Participant {
     pub id: String,
     pub name: String,
+}
+
+/// The program a peer's sessions run in, and what it can report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Harness {
+    /// The profile's name on that machine.
+    pub name: String,
+    /// "claude" or "acp".
+    pub kind: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Its prompts go to a service other than Anthropic's or the machine itself.
+    #[serde(default)]
+    pub external: bool,
+    /// It reports how much of a usage limit is left.
+    #[serde(default)]
+    pub capacity: bool,
+}
+
+impl Harness {
+    pub fn describe(&self) -> String {
+        let model = self.model.as_deref().map(|m| format!(", {m}")).unwrap_or_default();
+        format!("{}{model}{}", self.name, if self.external { ", external" } else { "" })
+    }
 }
 
 /// A peer's remaining capacity, read from the rate-limit information Claude Code

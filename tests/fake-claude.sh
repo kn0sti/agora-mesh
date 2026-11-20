@@ -9,7 +9,14 @@
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
 #   FAKE_DELAY       seconds to wait before every answer
 # The arguments of every start are appended to $AGORA_HOME/fake-args.log.
+# A start that is pointed at another model service is noted in
+# $AGORA_HOME/fake-env.log: the address, whether the key is the one in
+# FAKE_EXPECT_TOKEN (the key itself is not written), and the Anthropic key it sees.
 [ -n "${AGORA_HOME:-}" ] && echo "$*" >> "$AGORA_HOME/fake-args.log"
+if [ -n "${AGORA_HOME:-}" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  ok=no; [ "${ANTHROPIC_AUTH_TOKEN:-}" = "${FAKE_EXPECT_TOKEN:-}" ] && ok=yes
+  echo "base=$ANTHROPIC_BASE_URL token_ok=$ok api_key=[${ANTHROPIC_API_KEY-unset}] model=${ANTHROPIC_MODEL:-}" >> "$AGORA_HOME/fake-env.log"
+fi
 n=0
 human=0
 memory=""
@@ -31,6 +38,9 @@ while IFS= read -r line; do
         *"+changed line"*) answer "notes.txt:1 - saw the diff - looks fine" ;;
         *) answer "no diff arrived" ;;
       esac ;;
+    *"connection test"*) answer "ANSWER\\napple" ;;
+    *"Which word did you reply with"*) answer "ANSWER\\napple" ;;
+    *"Reply with only the word: "*) answer "one" ;;
     *"hands you a task"*) answer "DONE\\nDid the task. cwd=$(basename "$PWD")" ;;
     *"asks you one question"*) answer "The deadline is Friday. cwd=$(basename "$PWD")" ;;
     *"The work phase is over"*) answer "WORKRESULT: all packages are reported." ;;

@@ -1,22 +1,20 @@
-//! Rooms: one topic, one fresh Claude session per participating machine.
+//! Rooms: one topic, one fresh agent session per participating machine.
 //!
 //! The opener's daemon numbers the messages and says who speaks next. That is
 //! ordering, not authority: after the briefing all participants take equal turns.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::daemon::Shared;
 use crate::project;
-use crate::proto::{self, Capacity, KINDS, Member, Msg, Participant};
+use crate::proto::{self, KINDS, Member, Msg, Participant};
+use crate::session::{Session, is_limit};
 use crate::state::home;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -58,14 +56,6 @@ pub struct RoomHandle {
     pub cancel: watch::Sender<bool>,
     /// For a room joined here: the peer that opened it.
     pub from: Option<String>,
-}
-
-/// Returns when the room is told to stop.
-async fn stopped(cancel: &mut watch::Receiver<bool>) {
-    if cancel.wait_for(|stop| *stop).await.is_err() {
-        // Nobody can stop it any more: never return.
-        std::future::pending::<()>().await;
-    }
 }
 
 /// Kinds a discussion session writes itself, so it need not be told them again.
@@ -140,59 +130,6 @@ fn append(dir: &Path, file: &str, text: &str) {
     }
 }
 
-// ------------------------------------------------------------------ session
-
-/// A headless Claude Code process that is fed one user message per turn.
-struct Session {
-    child: Child,
-    cancel: watch::Receiver<bool>,
-    /// Set once the process was killed; its output can no longer be trusted.
-    dead: bool,
-    /// The model the session says it runs on.
-    model: Option<String>,
-    stdin: ChildStdin,
-    lines: Lines<BufReader<ChildStdout>>,
-    turns: u32,
-    tokens_in: u64,
-    tokens_out: u64,
-    /// Input tokens of the most recent turn.
-    last_in: u64,
-    /// What the most recent turn reported about the usage limit.
-    capacity: Option<Capacity>,
-    timeout: Duration,
-    /// Time spent waiting for the model.
-    busy: Duration,
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
-
-/// The session's turn failed because the account is at its usage limit.
-#[derive(Debug)]
-struct LimitReached;
-
-impl std::fmt::Display for LimitReached {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "usage limit reached")
-    }
-}
-
-impl std::error::Error for LimitReached {}
-
-fn is_limit(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<LimitReached>().is_some()
-}
-
-/// Whether an error result means the usage limit. The exact wording of a real
-/// limit error is not verified; status 429 and the usual phrases are accepted.
-fn is_limit_error(v: &serde_json::Value, text: &str) -> bool {
-    let t = text.to_lowercase();
-    v["api_error_status"].as_u64() == Some(429) || ["usage limit", "rate limit", "limit reached", "hit your limit"].iter().any(|p| t.contains(p))
-}
-
 /// One line per high-importance memory entry the session has not been told about.
 fn memory_notes(shared: &Shared, seen: &mut usize) -> String {
     shared.notices_since(seen).iter().map(|n| format!("[shared memory, new] {n}\n")).collect()
@@ -219,190 +156,6 @@ Reply with the first line DONE or BLOCKED, then at most six lines: what you did,
     )
 }
 
-/// `claude` in the headless mode the daemon talks to.
-fn claude_command() -> Command {
-    let mut cmd = Command::new(std::env::var("AGORA_CLAUDE").unwrap_or_else(|_| "claude".into()));
-    cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
-    // Let the session call `agora` itself, for the shared memory.
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        let mut parts = vec![dir];
-        parts.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-        if let Ok(path) = std::env::join_paths(parts) {
-            cmd.env("PATH", path);
-        }
-    }
-    cmd
-}
-
-impl Session {
-    fn start(dir: &Path, me: &str, others: &str, rights: &str, model: Option<&str>, cancel: watch::Receiver<bool>) -> Result<Session> {
-        let rules = format!(
-            "You are \"{me}\", one of several equal peers in an agora-mesh room. The other peers ({others}) are \
-Claude Code agents on other machines with their own files and knowledge; a human may read along. \
-Think for yourself: question weak points and do not agree out of politeness. \
-Reply format: the first line is exactly one of PROPOSAL, CRITIQUE, QUESTION, ANSWER, SPLIT_WORK, PASS, CONSENSUS, NEED_HUMAN; \
-your message follows on the next lines. Keep it short. Refer to earlier messages as #number instead of repeating them. \
-Send CONSENSUS only when you accept the latest proposal as it stands. Send NEED_HUMAN when a human has to decide. \
-Send PASS when you have nothing to add. \
-To divide work, send SPLIT_WORK with one line per package in the form `- <peer name>: <package>`; \
-once every peer answers CONSENSUS, all peers work on their packages at the same time. \
-The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
-`agora remember \"<text>\" --title \"<title>\" --importance high|normal|low` saves a fact every peer should keep. \
-A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
-        );
-        let mut cmd = claude_command();
-        // Connectors cost far more context than the whole discussion; see ARCHITECTURE.md section 7.
-        cmd.arg("--strict-mcp-config");
-        cmd.args(["--append-system-prompt", &rules]);
-        match rights {
-            "talk" => {
-                cmd.args(["--tools", ""]);
-            }
-            "read" => {
-                cmd.args(["--tools", "Read,Grep,Glob"]);
-            }
-            _ => {
-                let mode = std::env::var("AGORA_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
-                cmd.args(["--permission-mode", &mode]);
-            }
-        }
-        if let Ok(extra) = std::env::var("AGORA_CLAUDE_ARGS") {
-            cmd.args(extra.split_whitespace());
-        }
-        // The room's model comes last, so it wins over a model named in the environment.
-        if let Some(model) = model.filter(|m| proto::valid_model(m)) {
-            cmd.args(["--model", model]);
-        }
-        Self::spawn(cmd, dir, cancel)
-    }
-
-    fn spawn(mut cmd: Command, dir: &Path, cancel: watch::Receiver<bool>) -> Result<Session> {
-        // Its own process group, so that stopping the session also stops the
-        // commands it is running.
-        #[cfg(unix)]
-        cmd.process_group(0);
-        let mut child = cmd
-            .current_dir(dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow!("could not start claude: {e}"))?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        Ok(Session { child, cancel, dead: false, model: None, stdin, lines: BufReader::new(stdout).lines(), turns: 0, tokens_in: 0, tokens_out: 0, last_in: 0, capacity: None, timeout: TURN_TIMEOUT, busy: Duration::ZERO })
-    }
-
-    /// Sends one user message and waits for the turn's final answer. The turn
-    /// ends early when the room is stopped or the session takes too long; in
-    /// both cases the process is killed, because a late answer would be taken
-    /// for the answer to the next message.
-    async fn turn(&mut self, text: &str) -> Result<String> {
-        if self.dead {
-            bail!("the Claude session has ended");
-        }
-        let started = std::time::Instant::now();
-        let msg = serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
-        self.stdin.write_all(format!("{msg}\n").as_bytes()).await?;
-        self.stdin.flush().await?;
-        let limit = self.timeout;
-        let mut cancel = self.cancel.clone();
-        enum End {
-            Answer(Result<String>),
-            TimedOut,
-            Stopped,
-        }
-        let end = {
-            let answer = self.read_answer();
-            tokio::pin!(answer);
-            tokio::select! {
-                r = tokio::time::timeout(limit, &mut answer) => match r {
-                    Ok(r) => End::Answer(r),
-                    Err(_) => End::TimedOut,
-                },
-                _ = stopped(&mut cancel) => End::Stopped,
-            }
-        };
-        self.busy += started.elapsed();
-        match end {
-            End::Answer(r) => r,
-            End::TimedOut => {
-                self.kill();
-                bail!("the Claude session did not answer within {} minutes", limit.as_secs() / 60)
-            }
-            End::Stopped => {
-                self.kill();
-                bail!("stopped by `agora panic`")
-            }
-        }
-    }
-
-    /// Ends the session and everything it started.
-    fn kill(&mut self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.child.id() {
-            // A negative pid addresses the process group the session leads.
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", "--", &format!("-{pid}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        let _ = self.child.start_kill();
-        self.dead = true;
-    }
-
-    /// Reads the session's output up to the result of the current turn.
-    async fn read_answer(&mut self) -> Result<String> {
-        while let Some(line) = self.lines.next_line().await? {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-            if v["type"] == "rate_limit_event" {
-                if let Some(c) = Capacity::from_event(&v["rate_limit_info"]) {
-                    self.capacity = Some(c);
-                }
-                continue;
-            }
-            if v["type"] == "system" && v["subtype"] == "init" {
-                if let Some(model) = v["model"].as_str() {
-                    self.model = Some(model.to_string());
-                }
-                continue;
-            }
-            if v["type"] != "result" {
-                continue;
-            }
-            let u = &v["usage"];
-            let n = |k: &str| u[k].as_u64().unwrap_or(0);
-            self.last_in = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
-            self.tokens_in += self.last_in;
-            self.tokens_out += n("output_tokens");
-            self.turns += 1;
-            let text = v["result"].as_str().unwrap_or("").to_string();
-            if v["is_error"].as_bool().unwrap_or(false) {
-                if is_limit_error(&v, &text) {
-                    let resets_at = self.capacity.map(|c| c.resets_at).unwrap_or(0);
-                    self.capacity = Some(Capacity { utilization: 1.0, resets_at, limited: true });
-                    return Err(LimitReached.into());
-                }
-                bail!("the Claude session reported an error: {text}");
-            }
-            return Ok(text);
-        }
-        self.dead = true;
-        bail!("the Claude session ended unexpectedly")
-    }
-
-    fn tokens(&self) -> u64 {
-        self.tokens_in + self.tokens_out
-    }
-
-    fn stats(&self) -> String {
-        let per_turn = if self.turns > 0 { self.tokens_in / self.turns as u64 } else { 0 };
-        format!("{} turns, {} input tokens ({} per turn), {} output tokens, {:.0} s model time", self.turns, self.tokens_in, per_turn, self.tokens_out, self.busy.as_secs_f64())
-    }
-}
-
 fn write_stats(
     dir: &Path,
     room_id: &str,
@@ -419,40 +172,13 @@ fn write_stats(
         "room": room_id, "topic": topic, "role": role, "reason": reason, "messages": messages, "closed_at": closed_at,
         "turns": session.turns, "tokens_in": session.tokens_in, "tokens_out": session.tokens_out,
         "model_s": session.busy.as_secs(), "duration_s": took.as_secs(), "model": session.model,
+        "harness": session.harness, "tokens_estimated": session.estimated,
     });
     if let Some((total, peers)) = all {
         v["all_peers_tokens"] = total.into();
         v["peers"] = peers.into();
     }
     let _ = std::fs::write(dir.join("stats.json"), v.to_string());
-}
-
-/// Measures what one turn costs on this machine before anyone has said
-/// anything: a default headless session, one without connectors, and a room
-/// session. Uses real Claude sessions on the smallest model.
-pub async fn bench() -> Result<String> {
-    let dir = home().join("bench");
-    std::fs::create_dir_all(&dir)?;
-    let variants: [(&str, &[&str]); 3] = [
-        ("default headless session, tools off", &["--tools", ""]),
-        ("without connectors, tools off", &["--strict-mcp-config", "--tools", ""]),
-        ("room session (no connectors, built-in tools)", &["--strict-mcp-config"]),
-    ];
-    let mut out = String::from("Input tokens of one turn that only says one word, measured on this machine:\n\n");
-    for (name, args) in variants {
-        let mut cmd = claude_command();
-        cmd.args(["--model", "haiku", "--no-session-persistence"]);
-        cmd.args(args);
-        let (_keep, never) = watch::channel(false);
-        let mut s = Session::spawn(cmd, &dir, never)?;
-        s.turn("Reply with only the word: one").await?;
-        // Connectors finish loading after the first turn; the second turn shows the real cost.
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        s.turn("Reply with only the word: two").await?;
-        out.push_str(&format!("  {:>9}  {name}\n", s.last_in));
-    }
-    out.push_str("\nA session reads this again on every turn; after the first turn most of it comes from the cache.");
-    Ok(out)
 }
 
 // ------------------------------------------------------------------- opener
@@ -495,6 +221,8 @@ struct Opener {
     assigned: HashMap<String, Msg>,
     lean: bool,
     model: Option<String>,
+    /// The harness profile this machine's sessions of the room run on; its default if none.
+    harness: Option<String>,
     /// In a lean room: the session with tools that does this machine's packages.
     work_session: Option<Session>,
     work_dir: PathBuf,
@@ -535,6 +263,7 @@ pub async fn run_opener(
     token_budget: u64,
     lean: bool,
     model: Option<String>,
+    harness: Option<String>,
     project: Option<(String, PathBuf)>,
     rx: mpsc::Receiver<RoomEvent>,
     state: watch::Sender<RoomState>,
@@ -564,7 +293,10 @@ pub async fn run_opener(
     // The session works in the project's clone; log and result stay in the room directory.
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
     // A lean room discusses without tools; see `work_turn` for the work phase.
-    let session = Session::start(&work_dir, &me.name, &others, if lean { "talk" } else { "full" }, model.as_deref(), cancel.clone())?;
+    let session = Session::start(harness.as_deref(), &work_dir, &me.name, &others, if lean { "talk" } else { "full" }, model.as_deref(), cancel.clone())?;
+    for note in &session.notes {
+        append(&dir, "log.md", &format!("Note: {note}\n"));
+    }
     let budget = participants.iter().map(|p| (p.id.clone(), turns)).collect();
     let notice_idx = shared.notices_len();
     let mut room = Opener {
@@ -595,6 +327,7 @@ pub async fn run_opener(
         assigned: HashMap::new(),
         lean,
         model,
+        harness,
         work_session: None,
         work_dir,
         others,
@@ -922,7 +655,7 @@ and where relevant information can be found. This one message needs no kind on t
             return self.own_turn(prompt).await;
         }
         if self.work_session.is_none() {
-            self.work_session = Some(Session::start(&self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone())?);
+            self.work_session = Some(Session::start(self.harness.as_deref(), &self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone())?);
         }
         let ws = self.work_session.as_mut().unwrap();
         ws.timeout = WORK_TIMEOUT;
@@ -1368,8 +1101,13 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     let has_clone = clone.is_some();
     let work_dir = clone.unwrap_or_else(|| dir.clone());
     let discuss_rights = if invite.lean { "talk" } else { invite.rights.as_str() };
-    let mut session = match Session::start(&work_dir, &my_name, &others, discuss_rights, invite.model.as_deref(), cancel.clone()) {
-        Ok(s) => s,
+    let mut session = match Session::start(None, &work_dir, &my_name, &others, discuss_rights, invite.model.as_deref(), cancel.clone()) {
+        Ok(s) => {
+            for note in &s.notes {
+                append(&dir, "log.md", &format!("Note: {note}\n"));
+            }
+            s
+        }
         Err(e) => {
             shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: e.to_string() });
             return Err(e);
@@ -1506,7 +1244,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
                 // In a lean room the discussion session has no tools; a second one does the work.
                 if invite.lean && work_session.is_none() {
-                    work_session = Session::start(&work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()).ok();
+                    work_session = Session::start(None, &work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()).ok();
                 }
                 // A peer that joined late and has not spoken yet still needs to know what was said.
                 let before = catch_up.take().map(|c| format!("You joined this room while it was running. What was said before you joined:\n{c}\n\n")).unwrap_or_default();
