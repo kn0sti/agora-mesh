@@ -171,6 +171,14 @@ pub fn refuses_external(dir: &Path) -> bool {
     dir.ancestors().any(|a| a.join(".agora").join("no-external").exists())
 }
 
+/// Fails if a session of this profile must not run in `dir`.
+pub fn allowed_in(name: &str, profile: &Profile, dir: &Path) -> Result<()> {
+    if profile.external && refuses_external(dir) {
+        bail!("this project refuses sessions that send it to an outside service (.agora/no-external), and the harness profile \"{name}\" does");
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ presets
 
 /// A profile this program knows how to write. The values are what each
@@ -238,8 +246,12 @@ pub struct AddOptions {
     pub model: Option<String>,
     pub small_model: Option<String>,
     pub command: Option<String>,
+    pub permission_mode: Option<String>,
     pub local: bool,
 }
+
+/// The permission modes of Claude Code a profile may name.
+const PERMISSION_MODES: [&str; 6] = ["auto", "default", "acceptEdits", "dontAsk", "plan", "bypassPermissions"];
 
 /// The variables that tell Claude Code which model to ask for.
 const MODEL_VARS: [&str; 5] =
@@ -278,7 +290,23 @@ pub fn build(preset: &Preset, opt: &AddOptions) -> Result<(String, Profile, Vec<
         if p.external {
             notes.push("Marked external, because this program cannot know where the agent sends its prompts. Add --local if its model runs on this machine.".to_string());
         }
+        if opt.permission_mode.is_some() {
+            bail!("--permission-mode is for profiles that run Claude Code; an agent is given or refused each tool by the rights a room has");
+        }
         return Ok((name, p, notes));
+    }
+    match opt.permission_mode.as_deref() {
+        Some(mode) if !PERMISSION_MODES.contains(&mode) => bail!("--permission-mode must be one of {}", PERMISSION_MODES.join(", ")),
+        Some("bypassPermissions") => {
+            p.permission_mode = opt.permission_mode.clone();
+            notes.push("With bypassPermissions every command the model writes runs on this machine without any check.".to_string());
+        }
+        Some(_) => p.permission_mode = opt.permission_mode.clone(),
+        None => notes.push(
+            "Claude Code's auto mode cannot run its safety check on another model service: a session of this profile can discuss, read and run harmless commands, \
+but commands that need the check are refused, so it cannot finish a work package. To let it work unchecked, add the profile again with --permission-mode bypassPermissions."
+                .to_string(),
+        ),
     }
     let url = opt.url.clone().unwrap_or_else(|| preset.url.to_string());
     if url.is_empty() {
@@ -368,7 +396,8 @@ pub fn list() -> Result<String> {
             _ => "Claude Code".to_string(),
         };
         let model = p.info(name).model.map(|m| format!(", model {m}")).unwrap_or_default();
-        line(name, format!("{what}{model}{}", if p.external { ", external" } else { "" }));
+        let mode = p.permission_mode.as_deref().map(|m| format!(", permission mode {m}")).unwrap_or_default();
+        line(name, format!("{what}{model}{mode}{}", if p.external { ", external" } else { "" }));
     }
     out.push_str("\n* is the profile this machine's sessions use. Presets: `agora harness presets`.");
     Ok(out)
@@ -403,6 +432,13 @@ mod tests {
         assert_eq!(p.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-flash");
         assert!(p.external && p.other_backend());
         assert!(!p.info("deepseek").capacity);
+        // No permission mode unless asked for, and only one Claude Code knows.
+        assert_eq!(p.permission_mode, None);
+        let opt = AddOptions { key: Some("env:K".into()), permission_mode: Some("bypassPermissions".into()), ..AddOptions::default() };
+        assert_eq!(build(preset("deepseek"), &opt).unwrap().1.permission_mode.as_deref(), Some("bypassPermissions"));
+        let opt = AddOptions { key: Some("env:K".into()), permission_mode: Some("anything".into()), ..AddOptions::default() };
+        assert!(build(preset("deepseek"), &opt).is_err());
+        assert!(build(preset("opencode"), &AddOptions { permission_mode: Some("auto".into()), ..AddOptions::default() }).is_err());
     }
 
     #[test]

@@ -158,6 +158,7 @@ The shared memory and what happened:
 | `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
+| `agora harness` | which program and which model service this machine's sessions run on, see below |
 
 ## Several small plans on one project
 
@@ -178,6 +179,35 @@ What it does not do:
 - **Different accounts are untested.** The mesh contains nothing that depends on the account, but every run so far had both machines on one account.
 
 Check the terms of your Claude plan before one person runs several accounts. Sharing one account between people is not permitted by Anthropic's consumer terms; several people each using their own account is the case this is built for.
+
+## Other agents and other models
+
+A peer does not have to run Claude Code on a Claude model. Each machine chooses a **harness profile** for its own sessions; a room does not care which one a peer is on.
+
+| | Example | What runs |
+|---|---|---|
+| Claude Code on another model service | `agora harness add deepseek --key file:~/.keys/deepseek` | Claude Code, pointed at the service's Anthropic-compatible address. Presets: `deepseek`, `glm`, `kimi`, `minimax`, `qwen`, `openrouter`, `ollama`, `lmstudio`, and `anthropic-compatible` for any other. |
+| Another coding agent | `agora harness add opencode` | An agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com). Presets: `opencode`, `gemini`, `qwen-code`, `kimi-code`, `goose`, `cline`, `copilot`, `cursor`, `minimax-code`, `kiro`, `vibe`, `codex-acp`, and `acp` for any other. |
+
+```
+agora harness presets            # what `add` knows
+agora harness test deepseek      # two real turns: does it answer, keep to the room's format, report tokens?
+agora harness default deepseek   # this machine's sessions now run on it
+agora bench --harness deepseek   # what one turn costs there
+agora peers                      # shows which harness each peer runs on
+```
+
+Read this before you rely on it:
+
+- **How far it is tested.** The real Claude Code was run on such a profile against a local stand-in for a model service ([what it sends](docs/measurements/2026-11-claude-code-on-another-service.md)). The adapter for agents has only run against a scripted agent. Nothing here has run against a real model service or a real agent yet, and the presets are what each vendor's documentation said on 2026-11-20. `agora harness test` is there so that you find out on your machine.
+- **Keys.** A profile names where a key comes from (`env:NAME`, `file:PATH` or `cmd:COMMAND`, for example a keychain), never the key. A key for Anthropic in the environment is not passed on to another service.
+- **Working needs a decision.** On another model service Claude Code's `auto` permission mode cannot run its safety check: such a session can discuss, read and run harmless commands, but not finish a work package. `--permission-mode bypassPermissions` on `agora harness add` lets it work, and then every command that model writes runs unchecked.
+- **Rights of an agent.** An agent is allowed or refused each tool by the rights of the room: everything, reading only, or nothing. Its own reading tools usually do not ask, so "talk only" cannot be promised there.
+- **Tokens.** Sessions on another service start as lean as on Claude: no connectors, only the tools the rights need, one request per turn. An agent that does not report its tokens is counted by text length, and `agora stats` says so.
+- **Where your prompts go.** A profile on an outside service is marked external, and everything its sessions read is sent there. A file `.agora/no-external` in a project keeps such sessions out of it on that machine. What is said in a room reaches the service of every peer in it; `agora peers` shows who is external.
+- **Terms.** Flat-rate coding plans of most providers exclude automated use; keys billed by usage do not. Anthropic documents pointing Claude Code at another address and says it does not support other models there.
+
+The plan behind this, with what each agent and provider offers: [docs/design/other-harnesses.md](docs/design/other-harnesses.md).
 
 ## Compared with
 
@@ -200,6 +230,7 @@ Check the terms of your Claude plan before one person runs several accounts. Sha
 | `ask`, `delegate`, `review`, `peers` | Windows and NAT traversal are untested |
 | shared memory with live sync, Obsidian in both directions, block list | the daemon as a system service |
 | installation as a plugin, prebuilt binaries | |
+| sessions on other model services and on agents that speak the Agent Client Protocol | none of them run against a real service or a real agent yet |
 
 The full list of what is missing and untested is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-built). Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -260,6 +260,9 @@ enum HarnessCmd {
         /// For the preset `acp`: the agent's command, for example "opencode acp"
         #[arg(long)]
         command: Option<String>,
+        /// Claude Code's permission mode for sessions that may work; default: auto
+        #[arg(long)]
+        permission_mode: Option<String>,
         /// The agent's model runs on this machine, so the profile is not external
         #[arg(long)]
         local: bool,
@@ -362,9 +365,9 @@ fn harness_cmd(action: HarnessCmd) -> Result<()> {
     match action {
         HarnessCmd::List => say!("{}", harness::list()?),
         HarnessCmd::Presets => say!("{}", harness::presets()),
-        HarnessCmd::Add { preset, name, key, url, model, small_model, command, local } => {
+        HarnessCmd::Add { preset, name, key, url, model, small_model, command, permission_mode, local } => {
             let found = harness::PRESETS.iter().find(|p| p.name == preset).ok_or_else(|| anyhow!("no preset named \"{preset}\"; see `agora harness presets`"))?;
-            let (name, profile, notes) = harness::build(found, &harness::AddOptions { name, key, url, model, small_model, command, local })?;
+            let (name, profile, notes) = harness::build(found, &harness::AddOptions { name, key, url, model, small_model, command, permission_mode, local })?;
             harness::add(&name, profile)?;
             say!("Added the harness profile \"{name}\" to {}.", harness::path().display());
             for note in notes {

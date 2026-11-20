@@ -21,9 +21,10 @@ tests/e2e-local.sh             # network: join, approval, reconnect, revoke
 tests/e2e-rooms.sh             # rooms, budgets, work phase, takeover
 tests/e2e-memory.sh            # shared memory
 tests/e2e-everyday.sh          # ask, delegate, review, peers, late joiners, lost peers
+tests/e2e-harness.sh           # harness profiles: other model services, other agents (needs python3)
 ```
 
-The end-to-end scripts start two or three daemons on one machine and need network access, because the daemons find each other through iroh's public servers. They use no tokens: `tests/fake-claude.sh` stands in for Claude and answers from a script. Its switches (`FAKE_STUBBORN`, `FAKE_ASK`, `FAKE_SPLIT`, `FAKE_LIMIT`, `FAKE_DELAY`) are described at the top of the file.
+The end-to-end scripts start two or three daemons on one machine and need network access, because the daemons find each other through iroh's public servers. They use no tokens: `tests/fake-claude.sh` stands in for Claude and answers from a script. Its switches (`FAKE_STUBBORN`, `FAKE_ASK`, `FAKE_SPLIT`, `FAKE_LIMIT`, `FAKE_DELAY`) are described at the top of the file. `tests/fake-acp.py` does the same for an agent that speaks the Agent Client Protocol.
 
 To try something by hand without touching your own setup, give each daemon its own directory:
 

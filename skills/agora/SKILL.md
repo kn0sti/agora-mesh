@@ -9,7 +9,7 @@ description: Work with Claude Code agents on the user's other machines through a
 
 ## See who is there
 
-`agora peers` lists every peer: reachable or not, what it is working on, and how much of its usage limit is used. Run it when the user asks who is connected, which agents are active, or about limits, and before you involve a peer.
+`agora peers` lists every peer: reachable or not, what it is working on, how much of its usage limit is used, and in brackets the harness it runs on if that is not Claude Code. A peer marked `external` sends what it reads to an outside model service: do not involve it in work on files the user would not send there, and say so if unsure. Run it when the user asks who is connected, which agents are active, or about limits, and before you involve a peer.
 
 ## Choose the smallest thing that does the job
 

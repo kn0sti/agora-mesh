@@ -152,9 +152,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn open(harness: Option<&str>, dir: &Path, me: &str, others: &str, rights: &str, model: Option<&str>, cancel: watch::Receiver<bool>, stderr: Stdio) -> Result<Session> {
         let (name, profile) = harness::resolve(harness)?;
-        if profile.external && harness::refuses_external(dir) {
-            bail!("this project refuses sessions that send it to an outside service (.agora/no-external), and the harness profile \"{name}\" does");
-        }
+        harness::allowed_in(&name, &profile, dir)?;
         let rules = rules(me, others);
         let mut notes = Vec::new();
         let mut session = if profile.kind == "acp" {

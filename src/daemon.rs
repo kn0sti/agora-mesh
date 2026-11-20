@@ -1293,9 +1293,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     }
     let lean = req.args.get("lean").is_some_and(|v| v == "1");
     let model = model_of(req)?;
-    // Checked now, so that a wrong name fails before anyone is invited.
     let harness = req.args.get("harness").filter(|h| !h.is_empty()).cloned();
-    crate::harness::resolve(harness.as_deref())?;
     let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
@@ -1333,6 +1331,12 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
         bail!("already in {MAX_ROOMS} rooms");
     }
     let project = project_of(shared, req)?;
+    {
+        // Checked now, so that a wrong profile fails before anyone is invited.
+        let (name, profile) = crate::harness::resolve(harness.as_deref())?;
+        let dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(crate::state::home);
+        crate::harness::allowed_in(&name, &profile, &dir)?;
+    }
     let id = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 4]>());
     let (tx, rx) = mpsc::channel(1024);
     let (state_tx, state_rx) = watch::channel(RoomState::Running);
