@@ -421,19 +421,53 @@ ROOMS = {
         ],
         summary="main untouched  ·  8 messages  ·  351 s",
     ),
+    # 2026-11-real-agents.md, "A room of three harnesses", the third run.
+    "room-flow-three": dict(
+        peers=[("Mac", "Claude Code, bare, on DeepSeek"), ("Server", "OpenCode on DeepSeek"), ("Laptop", "Codex on gpt-6-luna")],
+        messages=[
+            ("Mac", "BRIEF", "the goal, and what is known"),
+            ("Server", "KNOWN_MISSING", "what it knows and lacks"),
+            ("Laptop", "KNOWN_MISSING", "what it knows and lacks"),
+            ("Mac", "ANSWER", "fills the gaps"),
+            ("Server", "ANSWER", "adds what it found"),
+            ("Laptop", "PASS", "nothing to add yet"),
+            ("Mac", "SPLIT_WORK", "one package per peer"),
+            ("Server", "CONSENSUS", "agreed"),
+            ("Laptop", "CONSENSUS", "agreed"),
+            ("room", "WORK", "all three work at once"),
+            ("Mac", "DONE", "tests/greet_test.sh"),
+            ("Laptop", "DONE", "docs/USAGE.md"),
+            ("Server", "DONE", "bin/greet.sh"),
+        ],
+        summary="main untouched  ·  13 messages  ·  325 s  ·  the test one wrote passes against the script another wrote",
+    ),
+}
+
+# Where things sit in a picture of a room, by the number of peers.
+ROOM_LAYOUT = {
+    2: dict(figsize=(11, 6.6), height=60, base=0, top=0.88, bottom=0.02, title_y=0.965, phase_y=0.958,
+            machines=[(2, 28), (70, 28)], lanes=dict(Mac=4, Server=50, room=27), width=46, kind_x=6.2, what_x=24.5),
+    3: dict(figsize=(11, 8.8), height=83, base=23, top=0.91, bottom=0.015, title_y=0.9737, phase_y=0.9685,
+            machines=[(2, 30), (35, 30), (68, 30)], lanes=dict(Mac=3, Server=30, Laptop=57, room=30), width=40, kind_x=5.6, what_x=19.6),
 }
 
 
 def room_frame(room, shown, t):
     """One picture of a room after `shown` messages; one more shows the result too."""
     messages = room["messages"]
-    fig, ax = plt.subplots(figsize=(11, 6.6), dpi=100)
+    peers = room.get("peers") or [("Mac", room["left"]), ("Server", room["right"])]
+    lay = ROOM_LAYOUT[len(peers)]
+    base = lay["base"]
+    fig, ax = plt.subplots(figsize=lay["figsize"], dpi=100)
     fig.patch.set_facecolor(t["surface"])
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.88, bottom=0.02)
+    fig.subplots_adjust(left=0.02, right=0.98, top=lay["top"], bottom=lay["bottom"])
     ax.set_facecolor(t["surface"])
     ax.set_xlim(0, 100)
-    ax.set_ylim(0, 60)
+    ax.set_ylim(0, lay["height"])
     ax.axis("off")
+    colours = {name: (t[f"wash{i + 1}"], t[f"s{i + 1}"]) for i, (name, _) in enumerate(peers)}
+    # What the daemon publishes belongs to no peer: green among two, neutral among three.
+    colours["room"] = (t["wash3"], t["s3"]) if len(peers) == 2 else (t["page"], t["muted"])
 
     def box(x, y, w, h, face, edge, radius=1.3, width=1.0):
         ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={radius}", linewidth=width, edgecolor=edge, facecolor=face, zorder=2))
@@ -441,47 +475,51 @@ def room_frame(room, shown, t):
     def label(x, y, text, size=10.5, weight="normal", colour=None, ha="center"):
         ax.text(x, y, text, ha=ha, va="center", fontsize=size, fontweight=weight, color=colour or t["ink"], zorder=5)
 
-    # The two machines.
-    for x, name, runs, colour in ((2, "Mac", room["left"], t["s1"]), (70, "Server", room["right"], t["s2"])):
-        box(x, 49, 28, 9, t["page"], t["border"])
-        ax.add_patch(Rectangle((x, 49), 0.9, 9, linewidth=0, facecolor=colour, zorder=3))
-        label(x + 3, 55.2, name, size=13, weight="semibold", ha="left")
-        label(x + 3, 51.6, runs, size=9.5, colour=t["ink2"], ha="left")
-    label(50, 55.2, "one room", size=11, colour=t["ink2"])
-    label(50, 51.6, "no master, no shared login", size=9.5, colour=t["muted"])
+    # The machines.
+    for (x, w), (name, runs) in zip(lay["machines"], peers):
+        box(x, 49 + base, w, 9, t["page"], t["border"])
+        ax.add_patch(Rectangle((x, 49 + base), 0.9, 9, linewidth=0, facecolor=colours[name][1], zorder=3))
+        label(x + 3, 55.2 + base, name, size=13, weight="semibold", ha="left")
+        label(x + 3, 51.6 + base, runs, size=9.5, colour=t["ink2"], ha="left")
+    if len(peers) == 2:
+        label(50, 55.2, "one room", size=11, colour=t["ink2"])
+        label(50, 51.6, "no master, no shared login", size=9.5, colour=t["muted"])
 
     # The messages, newest at the bottom.
     row = 4.55
     for i, (who, kind, what) in enumerate(messages[:shown]):
-        y = 44.2 - i * row
-        if who == "Mac":
-            x, face, edge = 4, t["wash1"], t["s1"]
-        elif who == "Server":
-            x, face, edge = 50, t["wash2"], t["s2"]
-        else:
-            x, face, edge = 27, t["wash3"], t["s3"]
+        y = 44.2 + base - i * row
+        x = lay["lanes"][who]
+        face, edge = colours[who]
         newest = i == shown - 1 and shown <= len(messages)
-        box(x, y - 1.75, 46, 3.5, face, edge, radius=1.0, width=2.0 if newest else 0.8)
+        box(x, y - 1.75, lay["width"], 3.5, face, edge, radius=1.0, width=2.0 if newest else 0.8)
         label(x + 1.6, y, f"#{i + 1}", size=9.5, colour=t["ink2"], ha="left")
-        label(x + 6.2, y, kind, size=10, weight="semibold", ha="left")
-        label(x + 24.5, y, what, size=9.5, colour=t["ink2"], ha="left")
+        label(x + lay["kind_x"], y, kind, size=10, weight="semibold", ha="left")
+        label(x + lay["what_x"], y, what, size=9.5, colour=t["ink2"], ha="left")
 
     # The result: the branches the peers pushed.
-    if shown > len(messages):
+    if shown > len(messages) and len(peers) == 2:
         y = 44.2 - len(messages) * row - 0.4
         box(4, y - 2.3, 92, 4.6, t["page"], t["border"])
         label(6, y, "pushed:", size=10, colour=t["ink2"], ha="left")
         label(15, y, "agora/<room>/mac", size=10, weight="semibold", colour=t["ink"], ha="left")
         label(40, y, "agora/<room>/server", size=10, weight="semibold", colour=t["ink"], ha="left")
         label(68, y, room["summary"], size=10, colour=t["ink2"], ha="left")
+    elif shown > len(messages):
+        y = 44.2 + base - len(messages) * row - 1.2
+        box(3, y - 3.4, 94, 6.8, t["page"], t["border"])
+        label(5, y + 1.5, "pushed:", size=10, colour=t["ink2"], ha="left")
+        for x, (name, _) in zip((14, 38, 63), peers):
+            label(x, y + 1.5, f"agora/<room>/{name.lower()}", size=10, weight="semibold", colour=t["ink"], ha="left")
+        label(5, y - 1.5, room["summary"], size=9.5, colour=t["ink2"], ha="left")
 
     kinds = [kind for _, kind, _ in messages]
     work = kinds.index("WORK") + 1
     split = min(i + 1 for i, kind in enumerate(kinds) if kind not in ("BRIEF", "KNOWN_MISSING", "ANSWER"))
     phases = [(0, "A room is opened"), (1, "Briefing"), (split, "Discussion"), (work, "Work phase"), (len(messages) + 1, "Result: one branch per peer")]
     phase = [name for start, name in phases if shown >= start][-1]
-    fig.text(0.03, 0.965, "A room, message by message", color=t["ink"], fontsize=16, fontweight="semibold", va="top")
-    fig.text(0.97, 0.958, phase, color=t["ink2"], fontsize=12, va="top", ha="right")
+    fig.text(0.03, lay["title_y"], "A room, message by message", color=t["ink"], fontsize=16, fontweight="semibold", va="top")
+    fig.text(0.97, lay["phase_y"], phase, color=t["ink2"], fontsize=12, va="top", ha="right")
     return fig
 
 

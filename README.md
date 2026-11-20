@@ -6,9 +6,9 @@ It was built for Claude Code and runs best there. A peer can also run Claude Cod
 
 No machine is the master. Every machine keeps its own login. It needs no VPN and no cloud account, and it does not use MCP.
 
-![Animation of a room, message by message. Two machines, one running Claude Code on a DeepSeek model and one running OpenCode on a DeepSeek model, exchange nine messages: a brief, what the other knows and lacks, an answer, a proposal, a split of the work, consensus, the start of the work phase, and two reports that the work is done. At the end each peer has pushed its own branch and main is untouched.](docs/img/room-flow.gif)
+![Animation of a room, message by message. Three machines, one running Claude Code on a DeepSeek model, one running OpenCode on a DeepSeek model and one running Codex, exchange thirteen messages: a brief, what the other two know and lack, two answers, a pass, a split of the work, two agreements, the start of the work phase, and three reports that the work is done. At the end each peer has pushed its own branch and main is untouched.](docs/img/room-flow-three.gif)
 
-*A room that ran on 2026-11-20, as it happened: nine messages, 422 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
+*A room that ran on 2026-11-20, as it happened: three different agents, thirteen messages, 325 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
 > **Status: early development, version 0.4.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 

@@ -51,6 +51,8 @@ Two daemons on one machine. One ran Claude Code, bare, on deepseek-v4.1-flash; t
 
 ## A work phase of two harnesses
 
+![The run below, message by message: nine messages between Claude Code and OpenCode, both on a DeepSeek model, ending in two pushed branches.](../img/room-flow.gif)
+
 Rooms with a work phase on other models, and what they changed in a room, are in [2026-11-claude-code-on-another-service.md](2026-11-claude-code-on-another-service.md), part 3. Since then an agent, too, only reads while a room discusses and works in a second session. This run used that: the same task as there (a small shell script and a page of documentation for it), each peer in its own clone of a throwaway repository, Claude Code (bare, `bypassPermissions`) on one side and OpenCode on the other, both on deepseek-v4.1-flash.
 
 | | |
@@ -96,6 +98,8 @@ Three daemons on one Mac, each with its own clone of one repository: Claude Code
 | Put together | the script works; there is no test | the script works, and the test one harness wrote passes against the script another wrote |
 | `main` | untouched | untouched |
 | Time, tokens of all peers | 471 s, 351,958 | 611 s, 350,153 |
+
+![The third run, message by message: thirteen messages between Claude Code on a DeepSeek model, OpenCode on a DeepSeek model and Codex, ending in three pushed branches.](../img/room-flow-three.gif)
 
 **What the first run found.** The session on Claude Code answered its package with one line of text and a tool call written out as text (`Bash<arg_key>command</arg_key>…`). It ran nothing and committed nothing. A reply to a package that named no kind counted as `DONE`, so the room closed with "work finished", and the result told the human to merge a branch that did not exist. Two things changed in version 0.4.0:
 
