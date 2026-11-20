@@ -130,9 +130,53 @@ pub fn handover_note(who: &str, branch: &str, f: &BranchFacts) -> String {
     note
 }
 
+/// Fetches one branch from origin, giving up after 20 seconds and never asking for a password.
+fn fetch(dir: &Path, branch: &str) {
+    use std::process::Stdio;
+    let child = Command::new("git").arg("-C").arg(dir).args(["fetch", "-q", "origin", branch])
+        .env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = child else { return };
+    for _ in 0..200 {
+        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The line of a commit message that says what its author meant to do next.
+fn next_line(body: &str) -> Option<String> {
+    body.lines().rev().find_map(|l| l.trim().strip_prefix("Next:").map(|n| n.trim().to_string())).filter(|n| !n.is_empty())
+}
+
+/// What the taker of a package can fetch: the state of its branch on origin,
+/// read on the taker's machine, so it does not depend on the peer that stopped.
+pub fn origin_note(dir: &Path, branch: &str) -> String {
+    fetch(dir, branch);
+    let remote = format!("refs/remotes/origin/{branch}");
+    if git(dir, &["rev-parse", "--verify", "--quiet", &remote]).is_none() {
+        return format!("Fetched here: origin has no branch `{branch}`, so nothing of this package was pushed. Start it from the plan.");
+    }
+    let commits = git(dir, &["log", "-4", "--format=%h %s", &remote]).map(|o| o.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>().join("; ")).unwrap_or_default();
+    let next = match git(dir, &["log", "-1", "--format=%b", &remote]).as_deref().and_then(next_line) {
+        Some(n) => format!(" Its last commit says what was to come next: {n}."),
+        None => String::new(),
+    };
+    format!("Fetched here: origin has `{branch}` with these last commits: {commits}.{next} Go on from that; whatever else the first owner did is not there.")
+}
+
 #[cfg(test)]
 mod branch_tests {
     use super::*;
+
+    #[test]
+    fn the_next_line_of_a_commit_is_found() {
+        assert_eq!(next_line("Did the parser.\n\nNext: the tests for it"), Some("the tests for it".to_string()));
+        assert_eq!(next_line("Did the parser."), None);
+        assert_eq!(next_line("Next:"), None);
+    }
 
     #[test]
     fn a_report_says_what_git_says() {

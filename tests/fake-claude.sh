@@ -8,6 +8,8 @@
 #   FAKE_PASS=1      has nothing to add on its first turn, agrees afterwards
 #   FAKE_LIMIT=1     fails with a usage-limit error when asked to work on a package
 #   FAKE_COMMIT=1    commits a first step on the package's branch before anything else
+#   FAKE_COMMIT=2    the same, with a "Next:" line, and pushes it
+#   FAKE_CRITIC=1    picks a hole whenever it is asked to be a proposal's critic
 #   FAKE_NOREPORT=1  answers a package with a tool call written as text, and reports when asked again
 #   FAKE_NOREPORT=2  the same, and does not report when asked again either
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
@@ -53,18 +55,21 @@ while IFS= read -r line; do
       else answer "DONE\\nDid the work once I was asked again."
       fi ;;
     *"Work phase. Package #"*)
-      if [ "${FAKE_COMMIT:-0}" = 1 ]; then
+      if [ "${FAKE_COMMIT:-0}" != 0 ]; then
         branch="$(printf '%s' "$line" | sed -n 's/.*on the branch `\([^`]*\)`.*/\1/p')"
         git checkout -q -b "$branch" 2>/dev/null
-        git -c user.name=fake -c user.email=fake@example.org commit -q --allow-empty -m "Half the work" 2>/dev/null
+        git -c user.name=fake -c user.email=fake@example.org commit -q --allow-empty -m "Half the work" -m "Next: the second half" 2>/dev/null
         echo "not finished" > wip.txt
+        [ "$FAKE_COMMIT" = 2 ] && git push -q origin "$branch" 2>/dev/null
       fi
       if [ "${FAKE_LIMIT:-0}" = 1 ]; then limit
       elif [ "${FAKE_NOREPORT:-0}" != 0 ]; then answer "Bash<arg_key>command</arg_key><arg_value>git status</arg_value>"
       else
         plan=""
         case "$line" in *"The room agreed on this plan"*) plan=" got-the-plan" ;; esac
-        case "$line" in *"What its machine reported when it stopped: Checked on "*"Half the work and not pushed"*"wip.txt"*) plan="$plan got-the-note" ;; esac
+        case "$line" in *"What is known about its state: Checked on "*"Half the work and not pushed"*"wip.txt"*) plan="$plan got-the-note" ;; esac
+        case "$line" in *"Fetched here: origin has no branch"*) plan="$plan nothing-to-fetch" ;; esac
+        case "$line" in *"Fetched here: origin has "*"Half the work"*"what was to come next: the second half"*) plan="$plan got-what-is-on-origin" ;; esac
         answer "DONE\\nDid the work. cwd=$(basename "$PWD")$plan"
       fi ;;
     *"Write the briefing"*) answer "Goal: agree on a plan. Known: nothing yet." ;;
@@ -81,7 +86,9 @@ while IFS= read -r line; do
       esac ;;
     *"Your turn"*)
       n=$((n + 1))
-      if [ "${FAKE_STUBBORN:-0}" = 1 ]; then answer "CRITIQUE\\nStill not convinced ($n).$memory"
+      critic=0; case "$line" in *"you are its critic"*) critic=1 ;; esac
+      if [ "${FAKE_CRITIC:-0}" = 1 ] && [ "$critic" = 1 ]; then answer "CRITIQUE\\nNobody owns the tests."
+      elif [ "${FAKE_STUBBORN:-0}" = 1 ]; then answer "CRITIQUE\\nStill not convinced ($n).$memory"
       elif [ "$human" = 1 ]; then answer "CONSENSUS\\nAgreed with the human's answer."
       elif [ "${FAKE_PASS:-0}" = 1 ] && [ "$n" = 1 ]; then answer "PASS\\nNothing to add yet."
       elif [ "${FAKE_PASS:-0}" = 1 ]; then answer "CONSENSUS\\nAgreed."

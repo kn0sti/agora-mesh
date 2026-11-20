@@ -10,7 +10,7 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 
 *A room that ran on 2026-11-20, as it happened: three different agents, thirteen messages, 325 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
-> **Status: early development, version 0.4.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
+> **Status: early development, version 0.5.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
@@ -19,9 +19,9 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 | It can | It cannot, or not yet |
 |---|---|
 | connect machines directly and encrypted, after a human approved each one | be safe with a peer you do not trust: a connected peer can make your machine run commands |
-| let agents brief each other, discuss under a budget, and agree or ask you | make a small task cheaper: there one agent alone is faster and uses fewer tokens |
+| let agents brief each other, discuss under a budget with one of them as the critic of each proposal, and agree or ask you | make a small task cheaper: there one agent alone is faster and uses fewer tokens |
 | split work and do the parts at the same time, one branch per peer, and check every "done" against git: the last commit, pushed or not | review or merge the branches for you; the measured results needed a review |
-| hand a package to another peer when one reaches its usage limit, and tell the taker what was left behind: the last commits, pushed or not, files not committed | move work that was not pushed: it stays on the machine that reached its limit |
+| hand a package to another peer when one reaches its usage limit or drops out, and tell the taker what it can fetch from origin and what the last commit said was to come next | move work that was not pushed: it stays on the machine that reached its limit |
 | wait for your go before anyone starts working, on the machine that opened the room and on the one a package lands on | resume a room after the opener's daemon restarted |
 | ask one peer a question, hand it a task, have it review your changes, with the terms on your block list kept out of whatever goes to a peer | catch a paraphrase: the block list finds the terms you named, word for word |
 | keep one memory on all machines, also as notes in an Obsidian vault | start at boot: the daemon starts on demand and with the plugin |
@@ -146,7 +146,7 @@ It finds the terms you named, word for word and without regard to case. It does 
 1. Each machine runs a small background daemon with its own key pair.
 2. One machine opens a network; others join with the network ID. A human approves every join.
 3. Any peer opens a room for a topic. Each invited daemon starts a fresh session in its own clone of the project, on the agent and model that machine is set up for.
-4. The opener briefs the others; then all take equal turns under a budget until they agree, split the work, or ask a human. Whoever makes a proposal has agreed to it; the room is agreed when every other peer says so.
+4. The opener briefs the others; then all take equal turns under a budget until they agree, split the work, or ask a human. Whoever makes a proposal has agreed to it; the room is agreed when every other peer says so. The first peer to answer a proposal is asked to look for its weakest point before it agrees.
 5. If they agreed on a split, each peer does its package on its own branch, at the same time. With `--approve` the room first shows you the split and waits for your go.
 6. The result goes back to the session that asked, and into the shared memory.
 
@@ -309,7 +309,7 @@ Peers on different accounts have not been run; every run so far had both machine
 | Shared memory | yes | no | some | task list |
 | Equal peers | yes | yes | varies | lead and teammates |
 
-Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
+Ideas and questions: [Discussions](https://github.com/kn0sti/agora-mesh/discussions). Two things in version 0.5.0 came from comments: the critic, and a handover that reads from origin. Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
