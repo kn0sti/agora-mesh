@@ -7,6 +7,9 @@
 #   FAKE_SPLIT=2     the same, with two packages for the opener
 #   FAKE_PASS=1      has nothing to add on its first turn, agrees afterwards
 #   FAKE_LIMIT=1     fails with a usage-limit error when asked to work on a package
+#   FAKE_COMMIT=1    commits a first step on the package's branch before anything else
+#   FAKE_NOREPORT=1  answers a package with a tool call written as text, and reports when asked again
+#   FAKE_NOREPORT=2  the same, and does not report when asked again either
 #   FAKE_UTIL        utilization it reports with every turn (default 0.42)
 #   FAKE_DELAY       seconds to wait before every answer
 # The arguments of every start are appended to $AGORA_HOME/fake-args.log.
@@ -45,11 +48,23 @@ while IFS= read -r line; do
     *"hands you a task"*) answer "DONE\\nDid the task. cwd=$(basename "$PWD")" ;;
     *"asks you one question"*) answer "The deadline is Friday. cwd=$(basename "$PWD")" ;;
     *"The work phase is over"*) answer "WORKRESULT: all packages are reported." ;;
+    *"That was not a report"*)
+      if [ "${FAKE_NOREPORT:-0}" = 2 ]; then answer "Let me look at the files first."
+      else answer "DONE\\nDid the work once I was asked again."
+      fi ;;
     *"Work phase. Package #"*)
+      if [ "${FAKE_COMMIT:-0}" = 1 ]; then
+        branch="$(printf '%s' "$line" | sed -n 's/.*on the branch `\([^`]*\)`.*/\1/p')"
+        git checkout -q -b "$branch" 2>/dev/null
+        git -c user.name=fake -c user.email=fake@example.org commit -q --allow-empty -m "Half the work" 2>/dev/null
+        echo "not finished" > wip.txt
+      fi
       if [ "${FAKE_LIMIT:-0}" = 1 ]; then limit
+      elif [ "${FAKE_NOREPORT:-0}" != 0 ]; then answer "Bash<arg_key>command</arg_key><arg_value>git status</arg_value>"
       else
         plan=""
         case "$line" in *"The room agreed on this plan"*) plan=" got-the-plan" ;; esac
+        case "$line" in *"What its machine reported when it stopped: Checked on "*"Half the work and not pushed"*"wip.txt"*) plan="$plan got-the-note" ;; esac
         answer "DONE\\nDid the work. cwd=$(basename "$PWD")$plan"
       fi ;;
     *"Write the briefing"*) answer "Goal: agree on a plan. Known: nothing yet." ;;

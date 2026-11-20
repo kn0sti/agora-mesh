@@ -84,9 +84,35 @@ The fourth attempt:
 
 This is the third kind of agent that started the work before the room had agreed on it, after two models on Claude Code. What stopped it was not the rule in the text but the session's rights.
 
+## A room of three harnesses
+
+Three daemons on one Mac, each with its own clone of one repository: Claude Code (bare, `bypassPermissions`) on deepseek-v4.1-flash as the opener, OpenCode on the same model, and Codex through its adapter on gpt-6-luna. The task names three things that do not depend on each other: a script, a file on how to call it, and a test for the script. Script: `real-three.sh`.
+
+| | First run, version 0.3.0 | Second run, version 0.4.0 |
+|---|---|---|
+| Until the work started | 73 s, 7 messages | 82 s, 9 messages |
+| What the room said at the end | "work finished" | "work finished" |
+| Branches in the origin | two of three: the script from OpenCode, the usage file from Codex | three: the script from OpenCode, the usage file from Codex, the test from Claude Code |
+| Put together | the script works; there is no test | the script works, and the test one harness wrote passes against the script another wrote |
+| `main` | untouched | untouched |
+| Time, tokens of all peers | 471 s, 351,958 | 611 s, 350,153 |
+
+**What the first run found.** The session on Claude Code answered its package with one line of text and a tool call written out as text (`Bash<arg_key>command</arg_key>…`). It ran nothing and committed nothing. A reply to a package that named no kind counted as `DONE`, so the room closed with "work finished", and the result told the human to merge a branch that did not exist. Two things changed in version 0.4.0:
+
+- A reply that starts with neither `DONE` nor `BLOCKED` is no report. The session is asked once more; after that the package is blocked.
+- To every `DONE` the daemon of the reporting machine adds what git says there about the package's branch.
+
+**The second run.** Every session reported, so asking again was not needed; that path is covered by the scripted tests only. The three lines from git read `Checked on Mac: agora/<room>/mac is at deb2f51 … and pushed`, and the same for the other two, and they were true: the origin held the three branches. Two peers went further than asked: the one with the test fetched the other's branch and ran its test against that script, and the one with the script fetched the test and ran it.
+
+The result for the human still got one thing wrong. It said that the clones had no shared remote and that each branch existed in its owner's clone only, which a peer had assumed during the discussion. Three lines from git said otherwise. The session that writes the result is now told that those lines come from git and that it should go by them where a report or an earlier message disagrees.
+
+**A third run** with that change ended the same way as the second, three branches and a test that passes, in 325 s with 404,312 tokens, and its result reads "All three branches are pushed to `origin`; all daemon lines agree with the reports." One run does not show that the sentence is what made the difference.
+
+A room like this is slow for what it produces: three one-file packages took five to ten minutes and 350,000 to 400,000 tokens, most of them in the working sessions of the two agents that bring their own context. It shows that three harnesses can share a room, not that they should for a task of this size.
+
 ## Not measured
 
 - Other agents the presets name: Gemini CLI, Kimi Code, Goose, Cline, Copilot CLI, Cursor CLI, MiniMax Code, Kiro, Mistral Vibe. Their commands come from documentation.
 - A work phase done by Qwen Code, and a task larger than two small files.
-- A room of three peers on three different harnesses.
+- A handover between real sessions: a real usage limit cannot be produced on demand, so the note for the taker has only met scripted sessions.
 - Stopping a real agent in the middle of a turn.

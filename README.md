@@ -10,7 +10,7 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 
 *A room that ran on 2026-11-20, as it happened: nine messages, 422 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
-> **Status: early development, version 0.3.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
+> **Status: early development, version 0.4.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
@@ -20,10 +20,10 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 |---|---|
 | connect machines directly and encrypted, after a human approved each one | be safe with a peer you do not trust: a connected peer can make your machine run commands |
 | let agents brief each other, discuss under a budget, and agree or ask you | make a small task cheaper: there one agent alone is faster and uses fewer tokens |
-| split work and do the parts at the same time, one branch per peer | review or merge the branches for you; the measured results needed a review |
-| hand a package to another peer when one reaches its usage limit | resume a room after the opener's daemon restarted |
-| wait for your go before anyone starts working, on the machine that opened the room and on the one a package lands on | give the taker of a package more than its branch: no note on what was done and what is half-finished |
-| ask one peer a question, hand it a task, have it review your changes | filter what you send to a peer: the block list guards the shared memory only |
+| split work and do the parts at the same time, one branch per peer, and check every "done" against git: the last commit, pushed or not | review or merge the branches for you; the measured results needed a review |
+| hand a package to another peer when one reaches its usage limit, and tell the taker what was left behind: the last commits, pushed or not, files not committed | move work that was not pushed: it stays on the machine that reached its limit |
+| wait for your go before anyone starts working, on the machine that opened the room and on the one a package lands on | resume a room after the opener's daemon restarted |
+| ask one peer a question, hand it a task, have it review your changes, with the terms on your block list kept out of whatever goes to a peer | catch a paraphrase: the block list finds the terms you named, word for word |
 | keep one memory on all machines, also as notes in an Obsidian vault | start at boot: the daemon starts on demand and with the plugin |
 | run a peer on another model or on another agent | make every agent lean: an agent brings 11,000 to 18,000 tokens per turn of its own |
 
@@ -53,6 +53,8 @@ The full list of what is missing is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-
 | OpenCode 1.19.6 | deepseek-v4.1-flash, glm-5.3-flash | yes | yes, with Claude Code | yes, with Claude Code |
 | Qwen Code 0.28.0 | qwen3.8-flash | yes | no | no |
 | Codex, through its adapter 2.8.0 | gpt-6-luna | yes | yes, with Claude Code | yes, with Claude Code |
+
+Claude Code on another model, OpenCode and Codex have also shared one room and built one package each, on three branches ([details](docs/measurements/2026-11-real-agents.md)).
 
 "Yes" means it ran on a real machine and ended with a usable result. The Claude rows ran between a Mac and a Linux machine; the others between two daemons on one Mac, with the models reached through a reseller. How to set a peer up for another model or agent is under [other agents and other models](#other-agents-and-other-models).
 
@@ -116,7 +118,9 @@ Every network has one memory that all its peers keep as plain Markdown files. An
 
 `agora obsidian <folder>` connects that memory with an Obsidian vault, in both directions: entries appear as notes in `<folder>/agora/<network>/`, and a note you write or change there becomes an entry on all peers. `agora block add "<term>"` keeps text that contains the term out of the memory, whichever way it comes in.
 
-The block list guards the shared memory and nothing else. What goes to a peer directly is not checked against it: the questions and tasks of `agora ask` and `agora delegate`, the diff that `agora review` sends along, and everything said in a room.
+The block list also covers what goes to a peer directly. What you type is refused with the term named: a question, a task, the diff that `agora review` sends along, the topic of a room, what you say in one. What a session writes is replaced on its way out by a line that says so: a contribution to a room, a report on a package, a result. `agora events` on your machine shows when that happened.
+
+It finds the terms you named, word for word and without regard to case. It does not find a paraphrase. It does not look into what a session commits and pushes, and the service a session's model runs on sees whatever that session reads.
 
 ## How it works
 
@@ -230,7 +234,7 @@ The shared memory and what happened:
 |---|---|
 | `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
 | `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
-| `agora block add "<term>"` | never let this text into the shared memory from this machine; it does not filter questions, tasks, diffs or what is said in a room |
+| `agora block add "<term>"` | never let this text leave this machine: not into the shared memory, and not to a peer in a question, a task, a diff or a room |
 | `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |

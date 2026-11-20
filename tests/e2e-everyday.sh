@@ -52,6 +52,18 @@ a ask "Which model?" --with Heimserver --model fable >/dev/null 2>&1
 check "the model named with a question is passed to the peer's session" 'grep -q -- "--model fable" "$T/b/fake-args.log"'
 check "something that is not a model name is refused" '! a ask "x" --with Heimserver --model "--dangerously-skip-permissions" >/dev/null 2>&1'
 
+# The block list also covers what goes to a peer.
+a block add "Geheimkunde" >/dev/null
+check "a question with a blocked term is not sent, and the refusal names the term" 'a ask "What did geheimkunde order?" --with Heimserver 2>&1 | grep -q "not sent: the text contains \"Geheimkunde\""'
+check "neither is a task or the topic of a room" '! a delegate "Write to Geheimkunde" --with Heimserver --project none >/dev/null 2>&1 && ! a discuss "The Geheimkunde offer" --with Heimserver --project none >/dev/null 2>&1'
+a block remove "Geheimkunde" >/dev/null
+b block add "Friday" >/dev/null
+a ask "What is the deadline?" --with Heimserver > "$T/ask-withheld" 2>&1
+check "what a session says is withheld if it contains a term its machine blocks" 'grep -q "withheld: this text contained a term" "$T/ask-withheld" && ! grep -q "Friday" "$T/ask-withheld"'
+check "the machine that withheld it notes that" 'b events | grep -q "withheld.*Friday"'
+b block remove "Friday" >/dev/null
+check "without the term on the list the answer arrives again" 'a ask "What is the deadline?" --with Heimserver 2>&1 | grep -q "The deadline is Friday"'
+
 # agora review
 mkdir -p "$T/repoA" "$T/repoB"
 G() { git -C "$1" -c user.name=t -c user.email=t@example.com "${@:2}"; }
@@ -62,6 +74,9 @@ b project add "$T/repoB" >/dev/null
 echo "changed line" > "$T/repoA/notes.txt"
 (cd "$T/repoA" && a review --with Heimserver --base HEAD > "$T/review" 2>&1)
 check "review sends the diff and returns the findings" 'grep -q "saw the diff" "$T/review"'
+a block add "changed line" >/dev/null
+check "a diff with a blocked term is not sent for review" '(cd "$T/repoA" && a review --with Heimserver --base HEAD 2>&1) | grep -q "not sent: the text contains \"changed line\""'
+a block remove "changed line" >/dev/null
 G "$T/repoA" checkout -q notes.txt
 check "review says so when there is nothing to review" '(cd "$T/repoA" && a review --with Heimserver --base HEAD 2>&1) | grep -q "nothing to review"'
 
