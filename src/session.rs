@@ -104,6 +104,7 @@ Send NEED_HUMAN when a human has to decide. \
 Send PASS when you have nothing to add. \
 To divide work, send SPLIT_WORK with one line per package in the form `- <peer name>: <package>`; \
 once every other peer answers CONSENSUS, all peers work on their packages at the same time. \
+A room that is asked to do work, not only to plan, ends without any work if a plan alone is agreed: answer a plan you accept with a SPLIT_WORK that takes it in, not with CONSENSUS. \
 Until a message starts the work phase and names your branch, do not change files, commit or push, even when a package is clearly yours. \
 {means} \
 A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
@@ -424,6 +425,8 @@ struct Acp {
     /// Whether the agent reports a running total of the session instead of
     /// the tokens of the turn. Found out on its second report.
     running_total: Option<bool>,
+    /// A request for permission was refused since the current prompt was sent.
+    refused: bool,
 }
 
 impl Acp {
@@ -443,6 +446,7 @@ impl Acp {
             seen_out: 0,
             turn_in: 0,
             running_total: None,
+            refused: false,
         }
     }
 
@@ -598,6 +602,9 @@ impl Session {
             ("session/update", _) => self.acp_mut().update(&v["params"]["update"]),
             ("session/request_permission", Some(id)) => {
                 let result = self.acp_mut().permission(&v["params"]);
+                if result["outcome"]["optionId"].as_str().is_none_or(|o| !v["params"]["options"].as_array().is_some_and(|all| all.iter().any(|x| x["optionId"] == o && x["kind"].as_str().is_some_and(|k| k.starts_with("allow"))))) {
+                    self.acp_mut().refused = true;
+                }
                 self.write(&json!({"jsonrpc": "2.0", "id": id, "result": result})).await?;
             }
             // Reading and writing files and running commands for the agent are
@@ -658,13 +665,38 @@ impl Session {
         if self.acp_mut().session_id.is_empty() {
             self.acp_open().await?;
         }
-        let acp = self.acp_mut();
-        acp.full.clear();
-        acp.tail.clear();
-        let text = match acp.rules.take() {
+        let text = match self.acp_mut().rules.take() {
             Some(rules) => format!("{rules}\n\n{text}"),
             None => text.to_string(),
         };
+        let (answer, stop) = self.acp_prompt(&text).await?;
+        // An agent that is refused a tool may give up its turn: Codex did,
+        // when it tried to start the work while the room was still
+        // discussing. That is not a failure of the agent. It is told what
+        // happened and asked for its contribution, once.
+        let (answer, stop) = if stop.as_deref() == Some("cancelled") && self.acp_mut().refused {
+            self.acp_prompt(
+                "The tool you wanted to use was refused: in this session you may not change anything. \
+If there is work to do, it starts when a message says so. Answer the last message now with your contribution, in the reply format, without that tool.",
+            )
+            .await?
+        } else {
+            (answer, stop)
+        };
+        match stop.as_deref() {
+            Some("cancelled") => bail!("the agent's turn was cancelled"),
+            Some("refusal") if answer.is_empty() => bail!("the agent refused to answer"),
+            _ => Ok(answer),
+        }
+    }
+
+    /// One prompt: sends it, collects the agent's answer and counts its tokens.
+    /// Returns the answer and why the agent stopped.
+    async fn acp_prompt(&mut self, text: &str) -> Result<(String, Option<String>)> {
+        let acp = self.acp_mut();
+        acp.full.clear();
+        acp.tail.clear();
+        acp.refused = false;
         let session_id = acp.session_id.clone();
         let result = self.acp_call("session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": text}]})).await?;
 
@@ -684,11 +716,7 @@ impl Session {
         self.tokens_in += tokens_in;
         self.tokens_out += tokens_out;
         self.turns += 1;
-        match result["stopReason"].as_str() {
-            Some("cancelled") => bail!("the agent's turn was cancelled"),
-            Some("refusal") if answer.is_empty() => bail!("the agent refused to answer"),
-            _ => Ok(answer),
-        }
+        Ok((answer, result["stopReason"].as_str().map(str::to_string)))
     }
 }
 

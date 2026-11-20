@@ -63,6 +63,16 @@ fn own_words(kind: &str) -> bool {
     matches!(kind, "BRIEF" | "ANSWER" | "PROPOSAL" | "CRITIQUE" | "QUESTION" | "SPLIT_WORK" | "PASS" | "CONSENSUS" | "NEED_HUMAN")
 }
 
+/// Records what a peer said last. A new proposal makes every earlier answer
+/// stale: a CONSENSUS or a PASS was given to what stood before, not to this.
+fn said(last_kind: &mut HashMap<String, String>, proposer: &mut Option<String>, speaker: &str, kind: &str) {
+    if kind == "PROPOSAL" || kind == "SPLIT_WORK" {
+        last_kind.clear();
+        *proposer = Some(speaker.to_string());
+    }
+    last_kind.insert(speaker.to_string(), kind.to_string());
+}
+
 /// Whether the peers are done with the proposal that stands: everyone
 /// answered CONSENSUS, where its author need not answer its own proposal.
 /// At least one peer has to have said CONSENSUS, so that a proposal alone
@@ -475,16 +485,12 @@ and where relevant information can be found. This one message needs no kind on t
                     let found = proto::parse_packages(&text, &names);
                     self.plan = text.clone();
                     self.split = if found.is_empty() { None } else { Some(found.into_iter().map(|(i, t)| (order[i].id.clone(), t)).collect()) };
-                    proposer = Some(speaker.id.clone());
                 }
-                "PROPOSAL" => {
-                    self.split = None;
-                    proposer = Some(speaker.id.clone());
-                }
+                "PROPOSAL" => self.split = None,
                 _ => {}
             }
             let next = self.speaker_after(&order, Some(&speaker.id)).map(|p| p.id).filter(|id| *id != speaker.id);
-            last_kind.insert(speaker.id.clone(), kind.clone());
+            said(&mut last_kind, &mut proposer, &speaker.id, &kind);
             let active: Vec<&Participant> = order.iter().filter(|p| !self.limited.contains(&p.id)).collect();
             let mut done = if kind == "NEED_HUMAN" {
                 Some("a human has to decide")
@@ -868,7 +874,8 @@ and where relevant information can be found. This one message needs no kind on t
             match ev {
                 Some(RoomEvent::Remote(p, Msg::RoomJoin { .. })) => missing.retain(|m| *m != p),
                 Some(RoomEvent::Remote(p, Msg::RoomDecline { reason, .. })) if missing.contains(&p) => bail!("a peer declined the room: {reason}"),
-                Some(RoomEvent::Panic) | None => bail!("room stopped"),
+                Some(RoomEvent::Panic) => bail!("room stopped by `agora panic`"),
+                None => bail!("room stopped"),
                 _ => {}
             }
         }
@@ -1376,5 +1383,32 @@ mod tests {
         // Nothing left to add: a pass in place of an agreement.
         assert!(agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "PASS")]), Some("a"), true));
         assert!(!agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "PASS")]), Some("a"), false));
+    }
+
+    #[test]
+    fn a_new_proposal_makes_earlier_answers_stale() {
+        let (a, b, c) = (Participant { id: "a".into(), name: "A".into() }, Participant { id: "b".into(), name: "B".into() }, Participant { id: "c".into(), name: "C".into() });
+        let run = |turns: &[(&str, &str)], active: &[&Participant], or_pass: bool| {
+            let (mut last, mut proposer) = (HashMap::new(), None);
+            for (who, kind) in turns {
+                said(&mut last, &mut proposer, who, kind);
+            }
+            agreed(active, &last, proposer.as_deref(), or_pass)
+        };
+        // As it happened with a real agent: it passed, then the other peer
+        // proposed a split. The pass was not an answer to the split.
+        assert!(!run(&[("b", "PASS"), ("a", "SPLIT_WORK")], &[&a, &b], true));
+        assert!(!run(&[("b", "PASS"), ("a", "SPLIT_WORK")], &[&a, &b], false));
+        assert!(run(&[("b", "PASS"), ("a", "SPLIT_WORK"), ("b", "CONSENSUS")], &[&a, &b], false));
+        // Three peers: B agreed to A's proposal, then C made another one. A's
+        // agreement to C's proposal does not make B's old agreement count.
+        let turns = [("a", "PROPOSAL"), ("b", "CONSENSUS"), ("c", "PROPOSAL"), ("a", "CONSENSUS")];
+        assert!(!run(&turns, &[&a, &b, &c], false));
+        assert!(!run(&turns, &[&a, &b, &c], true));
+        let mut all = turns.to_vec();
+        all.push(("b", "CONSENSUS"));
+        assert!(run(&all, &[&a, &b, &c], false));
+        // An answer that is not a proposal leaves the agreements standing.
+        assert!(run(&[("a", "PROPOSAL"), ("b", "QUESTION"), ("a", "ANSWER"), ("b", "CONSENSUS")], &[&a, &b], false));
     }
 }

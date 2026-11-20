@@ -61,7 +61,8 @@ check "it stops at the first turn over the budget (5 messages)" 'grep -q "; 5 me
 # Slow answers, so that the room is still running when it is stopped.
 export FAKE_DELAY=0.3; restart
 a discuss "Stop me" --turns 30 > "$T/out3" 2>&1 &
-wait_for 10 'a rooms | grep -q "^room "'
+# Both sides have to be in the room: stopped earlier, it ends with another message.
+wait_for 10 'a rooms | grep -q "^room " && b rooms | grep -q "^room "'
 ROOM3="$(a rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p')"
 b say "$ROOM3" "Please also think of backups" >/dev/null 2>&1
 a panic >/dev/null
@@ -129,6 +130,16 @@ check "its package is handed over, branch included" 'grep -A1 "Mac · HANDOVER" 
 check "the taker finishes both packages" '[ "$(grep -c "Mac · DONE" "$LOG8")" = 2 ] && grep -q "closed: work finished;" "$T/out8"'
 check "the peer is shown at its limit afterwards" 'a status | grep -q "Heimserver.*at its usage limit"'
 
+# 8b. A peer that had nothing to add before a proposal was made has not
+# answered that proposal: the room goes on until it does.
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null
+export FAKE_PASS=1; b status >/dev/null; unset FAKE_PASS
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
+(cd "$T" && a discuss "Pass first" --with Heimserver --turns 3 --project none > "$T/out8b" 2>&1)
+LOG8B="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "a pass before a proposal is not an answer to it" 'grep -q "Heimserver · PASS" "$LOG8B" && grep -q "Heimserver · CONSENSUS" "$LOG8B" && grep -q "closed: work finished\|closed: consensus" "$T/out8b"'
+
 # 9. A lean room discusses without tools and starts a second session for the
 # work. If that one cannot start, the package is blocked; the session without
 # tools does not do the work instead, and the room goes on for the others.
@@ -161,7 +172,7 @@ check "its room still closes with a result" 'grep -q "closed: work finished with
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
   [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }

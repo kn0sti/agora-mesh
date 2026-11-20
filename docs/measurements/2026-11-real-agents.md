@@ -29,7 +29,7 @@ All three speak protocol version 1 and offer a model and a mode as config option
 | Cached input | apart, as `cachedReadTokens` | | apart, as `cachedReadTokens` |
 | Modes | `build`, `plan` | `plan`, `default`, `auto-edit`, `auto`, `yolo` | `read-only`, `workspace-write`, `agent`, `agent-full-access` |
 | Mode it starts in | `build` | `auto` | `agent` |
-| Asked for permission before using a tool | no (in `build`) | not seen | not seen |
+| Asked for permission before using a tool | no (in `build`) | not seen | yes, in `read-only`: allow once, allow always, or refuse |
 | Usage limit | no | no | no; `_meta.quota` holds token counts only |
 
 Two things in the adapter came out of this:
@@ -62,9 +62,31 @@ Rooms with a work phase on other models, and what they changed in a room, are in
 | Tokens | 88,874 in total |
 | Time | 422 s |
 
+## A work phase with Codex
+
+The same task and set-up, with Codex (through its adapter, on a ChatGPT login) in place of OpenCode, and Claude Code (bare, `bypassPermissions`) on deepseek-v4.1-flash. It took four attempts, and three of them found something.
+
+| Attempt | What happened | What changed |
+|---|---|---|
+| 1 | Codex had nothing to add on its first turn and sent PASS. The other peer then proposed the split, and the room closed at once with "nothing left to add": the pass from before the proposal was counted as an answer to it. | A new proposal makes every earlier answer stale. This was a fault in version 0.2.0. With three peers it could close a room as agreed although one of them had only agreed to an earlier proposal. |
+| 2 | Codex proposed how the script should behave, the other peer agreed, and the room closed with a plan and no work. | The rules of a room now say that a room asked to do work needs an agreed split: a plan one accepts is answered with a split that takes it in. |
+| 3 | After the split, Codex tried to write the file, commit and push inside the discussion. Its read-only mode made it ask first, the request was refused, and Codex gave up its turn. The adapter took that for a failure and the peer left the room. | An agent that gives up its turn after a refusal is told what happened and asked for its contribution, once. |
+| 4 | Brief, known and missing, answer, pass, split, consensus, work, done, done. Codex again tried to start early, was refused, was asked again and answered with consensus. | |
+
+The fourth attempt:
+
+| | |
+|---|---|
+| Branches in the origin | `agora/<room>/mac` with `docs/USAGE.md` from Claude Code, `agora/<room>/server` with `bin/greet.sh` from Codex; `main` untouched |
+| The script | prints `Hello, world!` and `Hello, Ada!` |
+| Tokens | 278,760 in total, 245,924 of them on the Codex side: its working session read its whole context again with every command, most of it from the cache |
+| Time | 190 s |
+
+This is the third kind of agent that started the work before the room had agreed on it, after two models on Claude Code. What stopped it was not the rule in the text but the session's rights.
+
 ## Not measured
 
 - Other agents the presets name: Gemini CLI, Kimi Code, Goose, Cline, Copilot CLI, Cursor CLI, MiniMax Code, Kiro, Mistral Vibe. Their commands come from documentation.
-- A work phase done by Qwen Code or Codex, and a task larger than two small files.
-- What a permission request of a real agent looks like: none of the three sent one.
+- A work phase done by Qwen Code, and a task larger than two small files.
+- A room of three peers on three different harnesses.
 - Stopping a real agent in the middle of a turn.
