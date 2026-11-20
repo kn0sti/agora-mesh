@@ -45,6 +45,7 @@ Everything lives under `~/.agora/` (`AGORA_HOME` names another directory, which 
 | `AGORA_CLAUDE` | the `claude` executable to start for sessions |
 | `AGORA_CLAUDE_ARGS` | further arguments for every session, for example `--model sonnet` |
 | `AGORA_HARNESS` | the harness profile sessions run on, instead of the default in `harness.toml` |
+| `AGORA_ACP_TRACE` | a file that receives every message exchanged with an agent over the Agent Client Protocol, for debugging |
 | `AGORA_PERMISSION_MODE` | permission mode of sessions with full rights; default `auto` |
 | `AGORA_LIMIT_AT` | utilization from which a peer counts as limited; default `0.97` |
 | `AGORA_BIN`, `AGORA_RELEASE_BASE` | launcher only: use this binary, or download from this base URL |
@@ -114,8 +115,8 @@ Every participating machine keeps the room's log under `rooms/<id>/log.md`.
 2. **Briefing.** The opener's session writes a briefing (`BRIEF`). Each joiner answers once with what it knows and what it lacks (`KNOWN_MISSING`). The opener fills the gaps (`ANSWER`). None of this counts against the budget.
 3. **Discussion.** The joiners speak in the order they were invited, then the opener, and so on. The next speaker is always the next peer after the last speaker that still has turns. Default budget: 6 turns per peer (`--turns`).
 4. **Close.** The room closes
-   - when the latest contribution of every peer still taking part is `CONSENSUS`: consensus;
-   - when it is `PASS` or `CONSENSUS` for all: nothing left to add;
+   - when every peer still taking part answered `CONSENSUS` to the proposal that stands: consensus. The author of that proposal has agreed by making it and need not say so; without a proposal everyone has to. At least one peer must have said `CONSENSUS`;
+   - when the same holds with `PASS` counted too: nothing left to add;
    - when only one peer has turns left: turn budget used up;
    - when all sessions together have used more tokens than the token budget (default 5,000,000, `--tokens`; input tokens count in full, cache reads included);
    - when fewer than two peers remain.
@@ -134,6 +135,8 @@ A contribution starts with its kind on the first line. A session may send `PROPO
 **Joining late.** `agora invite <room> <peer>` brings a peer into a running room. Its invitation carries what was said so far (everything if short, otherwise the briefing and the last six messages) and the number of the last message, so it receives only what follows. It speaks before the opener from then on.
 
 **Lean rooms.** `agora discuss --lean` starts the discussion sessions without tools, which cuts the fixed context per turn from about 24,000 to about 3,700 tokens. The agents then cannot look anything up while they discuss. For the work phase each peer starts a second session with tools and gives it the agreed plan.
+
+**Two sessions without `--lean`.** A peer whose harness nothing checks does the same on its own: it discusses with reading rights and works in a second session. That is every harness except Claude Code on Anthropic's service, where the `auto` mode checks actions. The reason is a measured one: models on other services, given tools and no check, did not wait for the work phase and pushed to `main` during the discussion ([measurement](docs/measurements/2026-11-claude-code-on-another-service.md), part 3). A question or a task (`agora ask`, `agora delegate`) is not a discussion and keeps the rights the peer granted.
 
 **Lost links.** Every message of a room has a number, and every contribution of a joiner has a counter. A joiner that sees a gap, or whose link comes back, asks the opener to send again from the number it lacks (`RESEND`) and repeats its last contribution that was not confirmed. The opener ignores a contribution it has already used.
 
@@ -199,18 +202,20 @@ A value `env:NAME`, `file:PATH` or `cmd:COMMAND` in `env` is looked up when a se
 3. The profile's `model` is set with `session/set_config_option`, if the agent offers a model option with a value of that name. A mode the profile names for the room's rights (`modes`) is set the same way, or with `session/set_mode`; if that fails, the session does not start.
 4. The rules of the room are sent once, in front of the first message.
 5. `session/prompt` per turn. The contribution is the text the agent sent after its last tool call in that turn.
-6. `session/request_permission` is answered from the rights: refuse for `talk`, allow tools of the kinds `read`, `search` and `think` for `read`, allow for `full`. The option is chosen by its kind, never by its label. An agent's own reading tools usually do not ask, so `talk` and `read` are only as strict as the agent.
+6. `session/request_permission` is answered from the rights: refuse for `talk`, allow tools of the kinds `read`, `search` and `think` for `read`, allow for `full`. The option is chosen by its kind, never by its label. An agent that does not ask is not restrained by this: OpenCode ran its tools without a request in a real run. The presets for OpenCode, Qwen Code and Codex therefore name the agent's own read-only mode for `talk` and `read` (step 3); for other agents the two levels are only as strict as the agent asks.
 7. Stopping a turn kills the agent's process group, as for Claude Code.
 
 **What a harness reports** decides what the room can do with it:
 
 | | Claude Code on Anthropic | Claude Code on another service | Agent over the protocol |
 |---|---|---|---|
-| Tokens per turn | yes | yes, as the service counts them | the protocol's draft field if the agent fills it, else the context size it reports, else an estimate from text length; `stats.json` says `tokens_estimated` |
+| Tokens per turn | yes | yes, as the service counts them | the `usage` of the turn's end if the agent sends one (OpenCode and Codex do), else the context size it reports (Qwen Code), else an estimate from text length; `stats.json` says `tokens_estimated` for the last two |
 | How full the usage limit is | yes | no | no |
 | "Limit reached" | status 429 or the usual wording | the same | the usual wording in the agent's error |
 
 A peer that reports no usage limit shows "its harness reports no usage limit" in `agora peers`; work is not moved away from it in advance, and a limit error still hands its package to another peer.
+
+Agents count differently in `usage`: OpenCode and Codex report the tokens of the turn, with cached input apart, while the protocol's draft describes a total of the session. The adapter decides on the second report, where a total has grown by about a whole context and the tokens of a turn have not, and keeps the answer for the session. `AGORA_ACP_TRACE=<file>` writes every message exchanged with an agent to a file, prompts and answers included, to see what an agent really sends ([three agents compared](docs/measurements/2026-11-real-agents.md)).
 
 **External.** A profile whose prompts go to a service other than Anthropic's or the machine itself is marked `external`. In a directory with a file `.agora/no-external`, or below one, sessions of such a profile do not start: the opener's `agora discuss` fails before anyone is invited, and a joiner declines the room with that reason. This guards a project on the machine that holds the file. It does not stop a room's messages from reaching an external peer elsewhere.
 
@@ -356,6 +361,6 @@ Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, 
 | Telling each session which harness the others run on | the rules of a room call the others "coding agents"; `agora peers` shows the harness to the human |
 | Lean start switches per agent | a Claude Code session is started without connectors and with only the tools it needs; for agents over the protocol only the connectors are left out |
 
-Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts; a work phase on a model other than Claude's, and the addresses of the providers the presets point at (sessions and rooms on four other models ran through a reseller); a real agent over the Agent Client Protocol.
+Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts; the addresses of the providers the presets point at (sessions, rooms and work phases on other models ran through a reseller); the other agents the presets name, and a work phase done by a real agent over the Agent Client Protocol.
 
 Known weak spots: a peer that is a member of two networks shared with the same peer uses one link, and member lists of the second network do not travel over it. An approved peer can still fill another peer's shared memory or its room queue; approval is the boundary, not a quota.

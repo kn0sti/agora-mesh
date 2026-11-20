@@ -119,6 +119,14 @@ impl Profile {
         self.other_backend() && self.bare.unwrap_or(true)
     }
 
+    /// Whether something checks what the agent does before it happens. Only
+    /// Claude Code on Anthropic's service does, in its auto mode. Everywhere
+    /// else a session that may change files is trusted to wait for the work
+    /// phase, and real runs on other models showed that it does not.
+    pub fn checks_actions(&self) -> bool {
+        self.kind == "claude" && !self.other_backend()
+    }
+
     /// The session's environment with every reference looked up.
     pub fn environment(&self) -> Result<Vec<(String, String)>> {
         self.env.iter().map(|(k, v)| Ok((k.clone(), lookup(v).map_err(|e| anyhow!("{k}: {e}"))?))).collect()
@@ -136,6 +144,12 @@ impl Profile {
             capacity: self.kind == "claude" && !self.other_backend(),
         }
     }
+}
+
+/// Whether a session of this profile should only read while a room discusses,
+/// and leave the work to a second session that starts with the work phase.
+pub fn reads_while_discussing(name: Option<&str>) -> bool {
+    resolve(name).is_ok_and(|(_, p)| !p.checks_actions())
 }
 
 /// This machine's default profile, as peers see it.
@@ -209,15 +223,17 @@ pub struct Preset {
     /// A key that is the same for everyone (local servers); "" if the user has one of their own.
     fixed_key: &'static str,
     extra: &'static [(&'static str, &'static str)],
+    /// Kind "acp": the agent's own mode for a rights level, where a real run confirmed it.
+    modes: &'static [(&'static str, &'static str)],
     external: bool,
 }
 
 const fn backend(name: &'static str, about: &'static str, url: &'static str, model: &'static str, small: &'static str) -> Preset {
-    Preset { name, about, kind: "claude", command: &[], url, model, small, fixed_key: "", extra: &[], external: true }
+    Preset { name, about, kind: "claude", command: &[], url, model, small, fixed_key: "", extra: &[], modes: &[], external: true }
 }
 
 const fn agent(name: &'static str, about: &'static str, command: &'static [&'static str]) -> Preset {
-    Preset { name, about, kind: "acp", command, url: "", model: "", small: "", fixed_key: "", extra: &[], external: true }
+    Preset { name, about, kind: "acp", command, url: "", model: "", small: "", fixed_key: "", extra: &[], modes: &[], external: true }
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -235,9 +251,11 @@ pub const PRESETS: &[Preset] = &[
         extra: &[("CLAUDE_CODE_ATTRIBUTION_HEADER", "0")],
         ..backend("lmstudio", "Claude Code on a local LM Studio; needs --model", "http://localhost:1234", "", "")
     },
-    agent("opencode", "OpenCode", &["opencode", "acp"]),
+    // "plan" is OpenCode's mode without changes to files; seen in a real run of version 1.19.6.
+    Preset { modes: &[("talk", "plan"), ("read", "plan")], ..agent("opencode", "OpenCode", &["opencode", "acp"]) },
     agent("gemini", "Gemini CLI", &["gemini", "--acp"]),
-    agent("qwen-code", "Qwen Code", &["qwen", "--acp"]),
+    // "plan": seen in a real run of version 0.28.0.
+    Preset { modes: &[("talk", "plan"), ("read", "plan")], ..agent("qwen-code", "Qwen Code", &["qwen", "--acp"]) },
     agent("kimi-code", "Kimi Code", &["kimi", "acp"]),
     agent("goose", "Goose", &["goose", "acp"]),
     agent("cline", "Cline", &["cline", "--acp"]),
@@ -246,7 +264,11 @@ pub const PRESETS: &[Preset] = &[
     agent("minimax-code", "MiniMax Code", &["mcode", "acp"]),
     agent("kiro", "Kiro CLI", &["kiro-cli", "acp"]),
     agent("vibe", "Mistral Vibe", &["vibe-acp"]),
-    agent("codex-acp", "Codex CLI through its adapter; needs npx", &["npx", "-y", "@agentclientprotocol/codex-acp"]),
+    // "read-only": seen in a real run of the adapter's version 2.8.0.
+    Preset {
+        modes: &[("talk", "read-only"), ("read", "read-only")],
+        ..agent("codex-acp", "Codex CLI through its adapter; needs npx", &["npx", "-y", "@agentclientprotocol/codex-acp"])
+    },
     agent("acp", "any other agent that speaks the Agent Client Protocol; needs --command", &[]),
 ];
 
@@ -296,6 +318,7 @@ pub fn build(preset: &Preset, opt: &AddOptions) -> Result<(String, Profile, Vec<
             bail!("give the agent's command with --command, for example --command \"opencode acp\"");
         }
         p.model = opt.model.clone();
+        p.modes = preset.modes.iter().map(|(rights, mode)| (rights.to_string(), mode.to_string())).collect();
         if let Some(key) = &opt.key {
             let (var, source) = key.split_once('=').ok_or_else(|| anyhow!("for an agent, --key takes VARIABLE=SOURCE, for example GEMINI_API_KEY=env:GEMINI_API_KEY"))?;
             p.env.insert(var.to_string(), source.to_string());
@@ -483,6 +506,8 @@ mod tests {
         let (_, p, _) = build(preset("opencode"), &AddOptions::default()).unwrap();
         assert_eq!(p.command, ["opencode", "acp"]);
         assert_eq!(p.kind, "acp");
+        assert_eq!(p.modes.get("talk").map(String::as_str), Some("plan"));
+        assert_eq!(p.modes.get("full"), None);
     }
 
     #[test]

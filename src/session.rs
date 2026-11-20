@@ -86,19 +86,26 @@ fn limit_wording(text: &str) -> bool {
 }
 
 /// What every session is told about the room it takes part in.
-fn rules(me: &str, others: &str) -> String {
+fn rules(me: &str, others: &str, rights: &str) -> String {
+    let means = if rights == "talk" {
+        "You have no tools in this session: you cannot read files or run commands, so do not write tool calls; say what you would have to look up."
+    } else {
+        "The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
+`agora remember \"<text>\" --title \"<title>\" --importance high|normal|low` saves a fact every peer should keep."
+    };
     format!(
         "You are \"{me}\", one of several equal peers in an agora-mesh room. The other peers ({others}) are \
 coding agents on other machines with their own files and knowledge; a human may read along. \
 Think for yourself: question weak points and do not agree out of politeness. \
 Reply format: the first line is exactly one of PROPOSAL, CRITIQUE, QUESTION, ANSWER, SPLIT_WORK, PASS, CONSENSUS, NEED_HUMAN; \
 your message follows on the next lines. Keep it short. Refer to earlier messages as #number instead of repeating them. \
-Send CONSENSUS only when you accept the latest proposal as it stands. Send NEED_HUMAN when a human has to decide. \
+Send CONSENSUS only when you accept the latest proposal as it stands; whoever made a proposal has agreed to it and need not say so again. \
+Send NEED_HUMAN when a human has to decide. \
 Send PASS when you have nothing to add. \
 To divide work, send SPLIT_WORK with one line per package in the form `- <peer name>: <package>`; \
-once every peer answers CONSENSUS, all peers work on their packages at the same time. \
-The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
-`agora remember \"<text>\" --title \"<title>\" --importance high|normal|low` saves a fact every peer should keep. \
+once every other peer answers CONSENSUS, all peers work on their packages at the same time. \
+Until a message starts the work phase and names your branch, do not change files, commit or push, even when a package is clearly yours. \
+{means} \
 A room starts with a short briefing; during it you are told which first line to use instead, and nobody proposes or decides anything yet."
     )
 }
@@ -153,7 +160,7 @@ impl Session {
     fn open(harness: Option<&str>, dir: &Path, me: &str, others: &str, rights: &str, model: Option<&str>, cancel: watch::Receiver<bool>, stderr: Stdio) -> Result<Session> {
         let (name, profile) = harness::resolve(harness)?;
         harness::allowed_in(&name, &profile, dir)?;
-        let rules = rules(me, others);
+        let rules = rules(me, others, rights);
         let mut notes = Vec::new();
         let mut session = if profile.kind == "acp" {
             let mut cmd = Command::new(&profile.command[0]);
@@ -314,6 +321,9 @@ impl Session {
     }
 
     async fn write(&mut self, v: &Value) -> Result<()> {
+        if self.acp.is_some() {
+            trace(">", &v.to_string());
+        }
         self.stdin.write_all(format!("{v}\n").as_bytes()).await?;
         self.stdin.flush().await?;
         Ok(())
@@ -407,9 +417,13 @@ struct Acp {
     tail: String,
     /// The context size the agent last reported.
     context: u64,
-    /// The agent's own token totals so far, to turn a running total into a turn's share.
+    /// What the agent reported last, and what that made for the turn.
     seen_in: u64,
     seen_out: u64,
+    turn_in: u64,
+    /// Whether the agent reports a running total of the session instead of
+    /// the tokens of the turn. Found out on its second report.
+    running_total: Option<bool>,
 }
 
 impl Acp {
@@ -427,7 +441,30 @@ impl Acp {
             context: 0,
             seen_in: 0,
             seen_out: 0,
+            turn_in: 0,
+            running_total: None,
         }
+    }
+
+    /// The tokens of one turn from what the agent reported at its end.
+    /// Agents differ: OpenCode reports the turn, the protocol's draft
+    /// describes a total of the session. A total grows by about a whole
+    /// context with every turn; the tokens of a turn stay close to those of
+    /// the turn before. The second report tells the two apart, and the answer
+    /// is kept for the session.
+    fn share(&mut self, reported_in: u64, reported_out: u64) -> (u64, u64) {
+        if self.running_total.is_none() && self.turn_in > 0 {
+            self.running_total = Some(reported_in >= self.seen_in + self.turn_in / 2);
+        }
+        let turn = if self.running_total == Some(true) {
+            (reported_in.saturating_sub(self.seen_in), reported_out.saturating_sub(self.seen_out))
+        } else {
+            (reported_in, reported_out)
+        };
+        self.seen_in = reported_in;
+        self.seen_out = reported_out;
+        self.turn_in = turn.0;
+        turn
     }
 
     /// Answers the agent's question whether it may use a tool. The rights
@@ -466,6 +503,17 @@ impl Acp {
             }
             _ => {}
         }
+    }
+}
+
+/// Appends one line of the conversation with an agent to the file named in
+/// `AGORA_ACP_TRACE`, for finding out what an agent really sends. The file
+/// holds the prompts and answers in full, so it is only written on request.
+fn trace(direction: &str, line: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("AGORA_ACP_TRACE") else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{direction} {line}");
     }
 }
 
@@ -526,6 +574,7 @@ impl Session {
         acp.next_id += 1;
         self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await?;
         while let Some(line) = self.lines.next_line().await? {
+            trace("<", &line);
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
             if v.get("method").is_some() {
                 self.acp_incoming(&v).await?;
@@ -624,14 +673,8 @@ impl Session {
         let usage = &result["usage"];
         let (tokens_in, tokens_out) = if usage.is_object() {
             let n = |k: &str| usage[k].as_u64().unwrap_or(0);
-            let (total_in, total_out) = (n("inputTokens") + n("cachedReadTokens") + n("cachedWriteTokens"), n("outputTokens"));
-            // The protocol's draft describes these as totals of the session; an
-            // agent that sends a smaller number than before is counting per turn.
-            let share = |total: u64, seen: u64| if total >= seen { total - seen } else { total };
-            let turn = (share(total_in, acp.seen_in), share(total_out, acp.seen_out));
-            acp.seen_in = total_in;
-            acp.seen_out = total_out;
-            turn
+            // Input that came from the cache is reported apart from the rest.
+            acp.share(n("inputTokens") + n("cachedReadTokens") + n("cachedWriteTokens"), n("outputTokens"))
         } else {
             self.estimated = true;
             let read = if acp.context > 0 { acp.context } else { text.len() as u64 / 4 };
@@ -716,7 +759,7 @@ pub async fn try_out(harness: Option<&str>) -> Result<String> {
     out.push_str(&format!("  model:                   {}\n", s.model.as_deref().unwrap_or("not reported")));
     out.push_str(&format!(
         "  tokens:                  {}, {first_in} read in the first turn, {} in the second\n",
-        if s.estimated { "not reported (estimated from text length)" } else { "reported" },
+        if s.estimated { "not reported per turn (the size of the agent's context where it reports one, else estimated from text length)" } else { "reported" },
         s.last_in
     ));
     out.push_str(&format!("  usage limit:             {}\n", s.capacity.map(|c| c.describe()).unwrap_or_else(|| "not reported".into())));
@@ -771,6 +814,22 @@ mod tests {
         assert_eq!(a.tail, "ANSWER\nfour");
         assert_eq!(a.full, "Let me look. ANSWER\nfour");
         assert_eq!(a.context, 1234);
+    }
+
+    #[test]
+    fn tokens_of_a_turn_whichever_way_the_agent_counts() {
+        // As OpenCode reported them in a real run: the tokens of each turn.
+        let mut a = acp("full");
+        assert_eq!(a.share(11264, 4), (11264, 4));
+        assert_eq!(a.share(11301, 5), (11301, 5));
+        assert_eq!(a.share(11950, 40), (11950, 40));
+        // A running total of the session.
+        let mut a = acp("full");
+        assert_eq!(a.share(10000, 20), (10000, 20));
+        assert_eq!(a.share(20400, 45), (10400, 25));
+        assert_eq!(a.share(31000, 80), (10600, 35));
+        // Decided on the second report and kept: a total that later grows slowly stays a total.
+        assert_eq!(a.share(31200, 90), (200, 10));
     }
 
     #[test]
