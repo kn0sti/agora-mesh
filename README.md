@@ -60,6 +60,8 @@ Every network has one memory that all its peers keep as plain Markdown files. An
 
 `agora obsidian <folder>` connects that memory with an Obsidian vault, in both directions: entries appear as notes in `<folder>/agora/<network>/`, and a note you write or change there becomes an entry on all peers. `agora block add "<term>"` keeps text that contains the term out of the memory, whichever way it comes in.
 
+The block list guards the shared memory and nothing else. What goes to a peer directly is not checked against it: the questions and tasks of `agora ask` and `agora delegate`, the diff that `agora review` sends along, and everything said in a room.
+
 ## How it works
 
 ```
@@ -154,7 +156,7 @@ The shared memory and what happened:
 |---|---|
 | `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
 | `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
-| `agora block add "<term>"` | never let this text into the shared memory from this machine |
+| `agora block add "<term>"` | never let this text into the shared memory from this machine; it does not filter questions, tasks, diffs or what is said in a room |
 | `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
 | `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
 | `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
