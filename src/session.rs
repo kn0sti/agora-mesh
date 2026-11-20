@@ -171,16 +171,43 @@ impl Session {
             // Connectors cost far more context than the whole discussion; see ARCHITECTURE.md, sections 5 ("Sessions") and 11.
             cmd.arg("--strict-mcp-config");
             cmd.args(["--append-system-prompt", &rules]);
+            let other = profile.other_backend();
+            if profile.bare() {
+                // What Claude Code loads by itself (CLAUDE.md files above the
+                // directory, memory, plugins) stays on this machine, and a
+                // request is a tenth of the size; see
+                // docs/measurements/2026-11-claude-code-on-another-service.md.
+                cmd.arg("--bare");
+            }
+            // The auto mode sends its settings with every request (paths, the
+            // user's permission rules, the state of the repository) and cannot
+            // run its check on another service, so it is never used there.
             match rights {
                 "talk" => {
                     cmd.args(["--tools", ""]);
+                    if other {
+                        cmd.args(["--permission-mode", "default"]);
+                    }
                 }
                 "read" => {
-                    cmd.args(["--tools", "Read,Grep,Glob"]);
+                    // A bare session has no search tools.
+                    cmd.args(["--tools", if profile.bare() { "Read" } else { "Read,Grep,Glob" }]);
+                    if other {
+                        cmd.args(["--permission-mode", "default"]);
+                    }
                 }
                 _ => {
-                    let mode = profile.permission_mode.clone().or_else(|| std::env::var("AGORA_PERMISSION_MODE").ok()).unwrap_or_else(|| "auto".into());
+                    let mode = profile
+                        .permission_mode
+                        .clone()
+                        .or_else(|| std::env::var("AGORA_PERMISSION_MODE").ok().filter(|m| !(other && m == "auto")))
+                        .unwrap_or_else(|| if other { "default" } else { "auto" }.into());
                     cmd.args(["--permission-mode", &mode]);
+                    if other {
+                        // Without the auto mode nothing would let the session use
+                        // the shared memory that the rules of the room tell it about.
+                        cmd.args(["--allowedTools", "Bash(agora memory),Bash(agora memory *),Bash(agora remember *)"]);
+                    }
                 }
             }
             if let Ok(extra) = std::env::var("AGORA_CLAUDE_ARGS") {

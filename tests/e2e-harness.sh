@@ -48,6 +48,7 @@ check "Claude Code on another service answers and keeps the conversation" 'grep 
 check "its session is pointed at the service with the profile's key" 'grep -q "base=https://api.deepseek.com/anthropic token_ok=yes" "$T/a/fake-env.log"'
 check "a key for Anthropic is not passed on to the service" 'grep -q "api_key=\[\]" "$T/a/fake-env.log"'
 check "its session is told which model to ask for" 'grep -q "model=deepseek-flash\[1m\]" "$T/a/fake-env.log"'
+check "its session starts bare and never in auto mode" 'tail -1 "$T/a/fake-args.log" | grep -q -- "--bare" && tail -1 "$T/a/fake-args.log" | grep -q -- "--permission-mode default"'
 a harness test agent > "$T/test-acp" 2>&1
 check "an agent answers in the room format and keeps the conversation" 'grep -q "answers: *yes" "$T/test-acp" && grep -q "keeps to the room format: yes" "$T/test-acp" && grep -q "remembers the last turn: yes" "$T/test-acp"'
 check "the agent is given no connectors and no file or terminal access" 'grep -q "session/new cwd=bench mcp=0" "$T/a/fake-acp.log" && grep -q "terminal=false" "$T/a/fake-acp.log" && grep -q "\"readTextFile\": false" "$T/a/fake-acp.log"'
@@ -91,6 +92,9 @@ b trust Mac --rights full >/dev/null
 # The opener on another model service
 a discuss "Plan the docs" --with Heimserver --project none --harness deepseek --model fable > "$T/room3" 2>&1
 check "a room opened on another model service reaches consensus" 'grep -q "FINAL: the agreed plan" "$T/room3"'
+check "a session that may work on another service runs bare in the default permission mode" 'tail -1 "$T/a/fake-args.log" | grep -q -- "--bare" && tail -1 "$T/a/fake-args.log" | grep -q -- "--permission-mode default"'
+check "it may use the shared memory and nothing else without asking" 'tail -1 "$T/a/fake-args.log" | grep -q -- "--allowedTools Bash(agora memory),Bash(agora memory \*),Bash(agora remember \*)"'
+check "Claude Code on Anthropic's service is started as before" 'grep -- "--permission-mode auto" "$T/a/fake-args.log" | grep -vq -- "--bare"'
 check "the room's model is not asked of another service" '! tail -1 "$T/a/fake-args.log" | grep -q -- "--model" && grep -rq "keeps its own model" "$T/a/rooms"'
 check "no key appears in anything the daemons wrote" '! grep -rq -e "$FAKE_SERVICE_KEY" -e "$ANTHROPIC_API_KEY" "$T/a" "$T/b"'
 check "an unknown profile fails before anyone is invited" '! a discuss "X" --with Heimserver --project none --harness nothing >/dev/null 2>&1'

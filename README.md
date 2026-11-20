@@ -201,11 +201,12 @@ agora peers                      # shows which harness each peer runs on
 
 Read this before you rely on it:
 
-- **How far it is tested.** The real Claude Code was run on such a profile against a local stand-in for a model service ([what it sends](docs/measurements/2026-11-claude-code-on-another-service.md)). The adapter for agents has only run against a scripted agent. Nothing here has run against a real model service or a real agent yet, and the presets are what each vendor's documentation said on 2026-11-20. `agora harness test` is there so that you find out on your machine.
+- **How far it is tested.** Claude Code on another model has run for real: single sessions and two rooms on DeepSeek, GLM, Qwen and MiniMax models, through a reseller's Anthropic-compatible address. Both rooms kept to the room's format and reached consensus, on 78,379 and 21,515 tokens, and took four to eight minutes ([measurement](docs/measurements/2026-11-claude-code-on-another-service.md)). Not run: a work phase on another model, the providers' own addresses that the presets point at, and any real agent over the Agent Client Protocol; that adapter has only met a scripted agent. `agora harness test` is there so that you find out on your machine.
 - **Keys.** A profile names where a key comes from (`env:NAME`, `file:PATH` or `cmd:COMMAND`, for example a keychain), never the key. A key for Anthropic in the environment is not passed on to another service.
-- **Working needs a decision.** On another model service Claude Code's `auto` permission mode cannot run its safety check: such a session can discuss, read and run harmless commands, but not finish a work package. `--permission-mode bypassPermissions` on `agora harness add` lets it work, and then every command that model writes runs unchecked.
+- **What a session on another service sends.** Claude Code is started bare there: without `CLAUDE.md` files, memory, hooks and plugins, and never in the `auto` permission mode. Started the usual way it sent a `CLAUDE.md` from above the project, the path of the home directory, the user's permission rules and the state of the repository with every request, and a request was ten times the size. What still goes out besides the conversation is an identifier of the installation.
+- **Working needs a decision.** A session on another service can discuss, read, run read-only commands and use the shared memory. It cannot change files, so it cannot finish a work package. `--permission-mode bypassPermissions` on `agora harness add` lets it work, and then every command that model writes runs unchecked.
 - **Rights of an agent.** An agent is allowed or refused each tool by the rights of the room: everything, reading only, or nothing. Its own reading tools usually do not ask, so "talk only" cannot be promised there.
-- **Tokens.** Sessions on another service start as lean as on Claude: no connectors, only the tools the rights need, one request per turn. An agent that does not report its tokens is counted by text length, and `agora stats` says so.
+- **Tokens.** A bare session offers three tools instead of twelve and carries only the rules of the room: a turn without tools read 350 to 750 input tokens on the four models, against 3,743 on Claude. An agent that does not report its tokens is counted by text length, and `agora stats` says so.
 - **Where your prompts go.** A profile on an outside service is marked external, and everything its sessions read is sent there. A file `.agora/no-external` in a project keeps such sessions out of it on that machine. What is said in a room reaches the service of every peer in it; `agora peers` shows who is external.
 - **Terms.** Flat-rate coding plans of most providers exclude automated use; keys billed by usage do not. Anthropic documents pointing Claude Code at another address and says it does not support other models there.
 
@@ -232,7 +233,8 @@ The plan behind this, with what each agent and provider offers: [docs/design/oth
 | `ask`, `delegate`, `review`, `peers` | Windows and NAT traversal are untested |
 | shared memory with live sync, Obsidian in both directions, block list | the daemon as a system service |
 | installation as a plugin, prebuilt binaries | |
-| sessions on other model services and on agents that speak the Agent Client Protocol | none of them run against a real service or a real agent yet |
+| Claude Code on other models: sessions and rooms, run on four models through a reseller | a work phase on another model; the providers' own addresses |
+| agents that speak the Agent Client Protocol | not run with a real agent yet |
 
 The full list of what is missing and untested is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-built). Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
 

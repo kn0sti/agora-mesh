@@ -34,6 +34,10 @@ pub struct Profile {
     /// Prompts go to a service other than Anthropic's or this machine.
     #[serde(default, skip_serializing_if = "is_false")]
     pub external: bool,
+    /// Kind "claude" on another model service: `false` starts Claude Code with
+    /// everything it normally loads, instead of bare. See `Profile::bare`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bare: Option<bool>,
     /// Environment of the session. A value `env:NAME`, `file:PATH` or
     /// `cmd:COMMAND` is looked up when a session starts, so no key is kept here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -104,6 +108,15 @@ impl Profile {
     /// Claude Code pointed at a model service that is not Anthropic's.
     pub fn other_backend(&self) -> bool {
         self.kind == "claude" && self.env.contains_key("ANTHROPIC_BASE_URL")
+    }
+
+    /// Whether Claude Code is started in its bare mode: without CLAUDE.md
+    /// files, memory, hooks and plugins, and with three tools instead of twelve.
+    /// The rule for another model service, because what Claude Code loads by
+    /// itself is personal context that should not go there, and because it is
+    /// a tenth of the size.
+    pub fn bare(&self) -> bool {
+        self.other_backend() && self.bare.unwrap_or(true)
     }
 
     /// The session's environment with every reference looked up.
@@ -303,8 +316,9 @@ pub fn build(preset: &Preset, opt: &AddOptions) -> Result<(String, Profile, Vec<
         }
         Some(_) => p.permission_mode = opt.permission_mode.clone(),
         None => notes.push(
-            "Claude Code's auto mode cannot run its safety check on another model service: a session of this profile can discuss, read and run harmless commands, \
-but commands that need the check are refused, so it cannot finish a work package. To let it work unchecked, add the profile again with --permission-mode bypassPermissions."
+            "Claude Code's auto mode cannot run its safety check on another model service, so sessions of this profile run in the default permission mode: \
+they can discuss, read and run read-only commands, but cannot change files, so they cannot finish a work package. \
+To let them work unchecked, add the profile again with --permission-mode bypassPermissions."
                 .to_string(),
         ),
     }
@@ -341,6 +355,9 @@ but commands that need the check are refused, so it cannot finish a work package
     if is_local(&url) {
         p.external = false;
     }
+    notes.push(
+        "Sessions of this profile start Claude Code bare: without CLAUDE.md files, memory, hooks and plugins, and with the tools Bash, Edit and Read only.".to_string(),
+    );
     if p.external {
         notes.push("Marked external: everything a session of this profile reads is sent to that service. A file `.agora/no-external` in a project keeps such sessions out of it.".to_string());
         notes.push("Flat-rate coding plans of most providers exclude automated use; a key billed by usage does not have that restriction.".to_string());
@@ -431,6 +448,10 @@ mod tests {
         assert_eq!(p.env["ANTHROPIC_MODEL"], "deepseek-flash[1m]");
         assert_eq!(p.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "deepseek-flash");
         assert!(p.external && p.other_backend());
+        // Bare unless the profile says otherwise; never for Claude Code on Anthropic's service.
+        assert!(p.bare());
+        assert!(!Profile { bare: Some(false), ..p.clone() }.bare());
+        assert!(!Profile { kind: "claude".into(), ..Profile::default() }.bare());
         assert!(!p.info("deepseek").capacity);
         // No permission mode unless asked for, and only one Claude Code knows.
         assert_eq!(p.permission_mode, None);
