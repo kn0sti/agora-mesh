@@ -141,7 +141,8 @@ once
 a stop >/dev/null; b stop >/dev/null; sleep 1
 a status >/dev/null
 export AGORA_CLAUDE="$T/once.sh"; b status >/dev/null; export AGORA_CLAUDE="$HERE/fake-claude.sh"
-wait_for 40 'a status | grep -q "Heimserver *online"'
+# Both sides have to see the link: right after a restart one of two links is closed again.
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 (cd "$T/repoA" && a discuss "Build it lean" --with Heimserver --turns 3 --lean > "$T/out9" 2>&1)
 LOG9="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
 check "a peer whose working session cannot start reports its package as blocked" 'grep -A2 "Heimserver · BLOCKED" "$LOG9" | grep -q "could not start a session with tools"'
@@ -151,7 +152,7 @@ once
 a stop >/dev/null; b stop >/dev/null; sleep 1
 export AGORA_CLAUDE="$T/once.sh"; a status >/dev/null; export AGORA_CLAUDE="$HERE/fake-claude.sh"
 b status >/dev/null
-wait_for 40 'a status | grep -q "Heimserver *online"'
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 (cd "$T/repoA" && a discuss "Build it lean again" --with Heimserver --turns 3 --lean > "$T/out10" 2>&1)
 LOG10="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
 check "an opener whose working session cannot start blocks only its own package" 'grep -A2 "Mac · BLOCKED" "$LOG10" | grep -q "could not start a session with tools" && grep -q "Heimserver · DONE" "$LOG10"'

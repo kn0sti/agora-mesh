@@ -23,6 +23,17 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+  windows:
+    # Build only: the end-to-end scripts need a POSIX shell. Without this job
+    # a change that does not compile on Windows shows only when a release is cut.
+    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+      - run: cargo test
   macos:
     # macOS minutes count tenfold in a private repository: run them there only on request.
     if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'

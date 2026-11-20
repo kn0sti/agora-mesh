@@ -328,7 +328,7 @@ Nothing is written into the user's `CLAUDE.md`. Monitors are an experimental Cla
 
 Releases: a tag `vX.Y.Z` makes `.github/workflows/release.yml` build the binary for seven targets, write `SHA256SUMS` and publish a GitHub release; the tag, `Cargo.toml` and `plugin.json` must carry the same version.
 
-Verified: `claude plugin validate` passes; the launcher against a local stand-in for a release (download, reuse, tampered binary refused, missing checksum refused); the release workflow built all seven binaries for `v0.1.0`; the plugin installs from the marketplace, and a session then finds `agora`, which downloads the released binary and runs it. The plugin adds about 130 tokens to every session. Not verified: the hook and the monitor in an interactive session, and every binary except the one for macOS on x64.
+Verified: `claude plugin validate` passes; the launcher against a local stand-in for a release (download, reuse, tampered binary refused, missing checksum refused); the release workflow built all seven binaries for `v0.1.0` and `v0.2.0`; the plugin installs from the marketplace, and a session then finds `agora`, which downloads the released binary and runs it. The plugin adds about 130 tokens to every session. Not verified: the hook and the monitor in an interactive session, and every binary except the one for macOS on x64.
 
 ## 11. Measuring
 
