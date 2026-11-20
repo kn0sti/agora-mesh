@@ -184,11 +184,13 @@ external = true
 
 A value `env:NAME`, `file:PATH` or `cmd:COMMAND` in `env` is looked up when a session starts, so the file holds no key; `agora harness add` refuses a key in place of its source. Peers are told a profile's name, kind, model and whether it is external, nothing else.
 
-**Kind `claude`** is the session described above, with the profile's program, environment and permission mode. Three rules apply when the profile names another address (`ANTHROPIC_BASE_URL`):
+**Kind `claude`** is the session described above, with the profile's program, environment and permission mode. When the profile names another address (`ANTHROPIC_BASE_URL`), the session is started differently:
 
-- `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are taken from the profile only. One that the daemon's environment happens to hold is not passed on.
-- The room's `--model` is not used; it names a Claude model. The room's log notes that the peer keeps its own.
-- The permission mode stays `auto` unless the profile names one. Claude Code cannot run the safety check of `auto` there, so a session with full rights can read and run harmless commands and is refused the rest ([measured](docs/measurements/2026-11-claude-code-on-another-service.md)). A profile with `permission_mode = "bypassPermissions"` works, unchecked.
+- **Bare.** `--bare` keeps Claude Code from loading `CLAUDE.md` files, memory, hooks and plugins, and leaves it three tools: `Bash`, `Edit` and `Read`. Started the usual way, a session sent a `CLAUDE.md` from above the project and its settings to the other service with every request, and a request was ten times the size ([measured](docs/measurements/2026-11-claude-code-on-another-service.md)). `bare = false` in the profile turns this off. With the rights `read` a bare session has `Read` only, because it has no search tools.
+- **Never `auto`.** Claude Code cannot run the safety check of the `auto` mode there, and in that mode it sends the user's permission rules, paths and the state of the repository along. The session runs in `default`: it can read and run read-only commands and is refused the rest, so it cannot finish a work package. A profile added with `--permission-mode bypassPermissions` works, unchecked.
+- **The shared memory.** `agora memory` and `agora remember` are allowed without asking, so that the session can use what the rules of the room tell it about. No other `agora` command is.
+- **Credentials.** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are taken from the profile only. One that the daemon's environment happens to hold is not passed on.
+- **Model.** The room's `--model` is not used; it names a Claude model. The room's log notes that the peer keeps its own.
 
 **Kind `acp`** drives an agent over the Agent Client Protocol, version 1: JSON-RPC 2.0, one message per line, on the agent's standard input and output.
 
@@ -354,6 +356,6 @@ Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, 
 | Telling each session which harness the others run on | the rules of a room call the others "coding agents"; `agora peers` shows the harness to the human |
 | Lean start switches per agent | a Claude Code session is started without connectors and with only the tools it needs; for agents over the protocol only the connectors are left out |
 
-Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts; a session on a real model service other than Anthropic's; a real agent over the Agent Client Protocol.
+Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts; a work phase on a model other than Claude's, and the addresses of the providers the presets point at (sessions and rooms on four other models ran through a reseller); a real agent over the Agent Client Protocol.
 
 Known weak spots: a peer that is a member of two networks shared with the same peer uses one link, and member lists of the second network do not travel over it. An approved peer can still fill another peer's shared memory or its room queue; approval is the boundary, not a quota.
