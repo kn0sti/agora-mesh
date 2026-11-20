@@ -2,8 +2,6 @@
 
 This file is written for a Claude Code agent that a user asked to install agora-mesh. Follow the steps in order and show the user what you do.
 
-> **No release has been published yet.** Until the repository has a release, the launcher has nothing to download: step 5 fails with "download failed". If that happens, tell the user that agora-mesh has to be built from source for now (`cargo build --release`, then set `AGORA_BIN` to `target/release/agora`), and stop.
-
 Installing the plugin adds the `agora` command, a skill, a hook that starts the daemon when a session starts, and a monitor that tells the session about events. The first call of `agora` downloads the binary for this platform from the GitHub release `v<plugin version>` and checks it against `SHA256SUMS`. That needs `curl` or `wget`, and `sha256sum` or `shasum`.
 
 ## Rules for the installing agent
