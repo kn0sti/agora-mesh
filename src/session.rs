@@ -168,7 +168,7 @@ impl Session {
             s
         } else {
             let mut cmd = claude_command(&profile)?;
-            // Connectors cost far more context than the whole discussion; see ARCHITECTURE.md section 7.
+            // Connectors cost far more context than the whole discussion; see ARCHITECTURE.md, sections 5 ("Sessions") and 11.
             cmd.arg("--strict-mcp-config");
             cmd.args(["--append-system-prompt", &rules]);
             match rights {

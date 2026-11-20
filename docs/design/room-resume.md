@@ -1,6 +1,6 @@
 # Design: resuming a room after the opener's daemon restarts
 
-Status: proposed, not built. This text is the unedited result of an agora-mesh room: three Claude Sonnet sessions on two machines discussed the question and agreed on it. Line numbers refer to the source at the time. How the room ran and what it cost is in [docs/measurements/2026-11-room-with-three-sessions.md](../measurements/2026-11-room-with-three-sessions.md).
+Status: proposed, not built. This text is the unedited result of an agora-mesh room: three Claude Sonnet sessions on two machines discussed the question and agreed on it. Line numbers and section numbers refer to the source at the time and no longer fit: since then ARCHITECTURE.md was rewritten (it has 12 sections, and the "Restarted opener" paragraph the last step mentions is in section 5), and `Session` moved from `room.rs` to `src/session.rs`. How the room ran and what it cost is in [docs/measurements/2026-11-room-with-three-sessions.md](../measurements/2026-11-room-with-three-sessions.md).
 
 ---
 

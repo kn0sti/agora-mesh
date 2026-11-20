@@ -266,7 +266,7 @@ The author shown for an entry is the name this machine knows that peer by, not w
 
 **Room results.** When a room opened here closes with a result, the result is saved as `Room <id>: <topic>` with importance normal (`agora discuss --remember high|normal|low|none`).
 
-**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. This does not filter what sessions say to each other in a room.
+**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. Nothing else is checked against it: not what sessions say to each other in a room, and not what `agora ask`, `agora delegate` and `agora review` send to a peer, the diff of a review included.
 
 **Obsidian.** `agora obsidian <vault folder>` connects the memory with an Obsidian vault in both directions.
 

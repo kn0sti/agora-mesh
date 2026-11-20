@@ -45,6 +45,7 @@ When the user decides after planning that a peer should do the work, use `agora 
 - `agora memory` lists what all peers keep in common; `agora memory show <id>` prints one entry.
 - `agora remember "<text>" --title "<title>" --importance high|normal|low` saves a fact every peer should know. Use `high` only for what running sessions on other machines need at once.
 - Never put secrets, credentials or customer data into the shared memory.
+- The user's block list (`agora block`) only keeps text out of the shared memory. It does not filter a question, a task, a diff sent for review or a contribution to a room, so leave out of those what the user would not send to the peer, and ask if unsure.
 
 ## What only the user decides
 
