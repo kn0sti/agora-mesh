@@ -129,10 +129,38 @@ check "its package is handed over, branch included" 'grep -A1 "Mac · HANDOVER" 
 check "the taker finishes both packages" '[ "$(grep -c "Mac · DONE" "$LOG8")" = 2 ] && grep -q "closed: work finished;" "$T/out8"'
 check "the peer is shown at its limit afterwards" 'a status | grep -q "Heimserver.*at its usage limit"'
 
+# 9. A lean room discusses without tools and starts a second session for the
+# work. If that one cannot start, the package is blocked; the session without
+# tools does not do the work instead, and the room goes on for the others.
+once() {
+  # A stand-in that can be started once: the second start finds no program.
+  printf '#!/usr/bin/env bash\nmv "$0" "$0.used"\nexec "%s/fake-claude.sh" "$@"\n' "$HERE" > "$T/once.sh"
+  chmod +x "$T/once.sh"
+}
+once
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null
+export AGORA_CLAUDE="$T/once.sh"; b status >/dev/null; export AGORA_CLAUDE="$HERE/fake-claude.sh"
+wait_for 40 'a status | grep -q "Heimserver *online"'
+(cd "$T/repoA" && a discuss "Build it lean" --with Heimserver --turns 3 --lean > "$T/out9" 2>&1)
+LOG9="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "a peer whose working session cannot start reports its package as blocked" 'grep -A2 "Heimserver · BLOCKED" "$LOG9" | grep -q "could not start a session with tools"'
+check "the room goes on and closes with the other package done" 'grep -q "Mac · DONE" "$LOG9" && grep -q "closed: work finished with open packages" "$T/out9"'
+
+once
+a stop >/dev/null; b stop >/dev/null; sleep 1
+export AGORA_CLAUDE="$T/once.sh"; a status >/dev/null; export AGORA_CLAUDE="$HERE/fake-claude.sh"
+b status >/dev/null
+wait_for 40 'a status | grep -q "Heimserver *online"'
+(cd "$T/repoA" && a discuss "Build it lean again" --with Heimserver --turns 3 --lean > "$T/out10" 2>&1)
+LOG10="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "an opener whose working session cannot start blocks only its own package" 'grep -A2 "Mac · BLOCKED" "$LOG10" | grep -q "could not start a session with tools" && grep -q "Heimserver · DONE" "$LOG10"'
+check "its room still closes with a result" 'grep -q "closed: work finished with open packages" "$T/out10" && grep -q "WORKRESULT" "$T/out10"'
+
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
   [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }

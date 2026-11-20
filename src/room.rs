@@ -604,7 +604,10 @@ and where relevant information can be found. This one message needs no kind on t
                         (i, kind, text)
                     }
                     Err(e) if is_limit(&e) => (i, "LIMIT".to_string(), "usage limit reached".to_string()),
-                    Err(e) => return Err(e),
+                    // Stopped by a human: the whole room ends.
+                    Err(e) if *self.cancel.borrow() => return Err(e),
+                    // Anything else blocks this package only; the other peers go on working.
+                    Err(e) => (i, "BLOCKED".to_string(), format!("the session failed: {e}")),
                 }
             } else {
                 let (peer, id, kind, text) = self.wait_report().await?;
@@ -655,7 +658,8 @@ and where relevant information can be found. This one message needs no kind on t
             return self.own_turn(prompt).await;
         }
         if self.work_session.is_none() {
-            self.work_session = Some(Session::start(self.harness.as_deref(), &self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone())?);
+            let started = Session::start(self.harness.as_deref(), &self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone());
+            self.work_session = Some(started.map_err(|e| anyhow!("could not start a session with tools for the work: {e}"))?);
         }
         let ws = self.work_session.as_mut().unwrap();
         ws.timeout = WORK_TIMEOUT;
@@ -1244,7 +1248,18 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
                 // In a lean room the discussion session has no tools; a second one does the work.
                 if invite.lean && work_session.is_none() {
-                    work_session = Session::start(None, &work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()).ok();
+                    match Session::start(None, &work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()) {
+                        Ok(s) => work_session = Some(s),
+                        Err(e) => {
+                            // The discussion session has no tools, so it must not do the work instead.
+                            let text = format!("could not start a session with tools for the work: {e}");
+                            let m = say(&mut said, "BLOCKED".to_string(), text, used(&session, &work_session), 0, Some(package));
+                            reports.insert(package, m.clone());
+                            pending = Some(m.clone());
+                            shared.send_to(&invite.from, m);
+                            continue;
+                        }
+                    }
                 }
                 // A peer that joined late and has not spoken yet still needs to know what was said.
                 let before = catch_up.take().map(|c| format!("You joined this room while it was running. What was said before you joined:\n{c}\n\n")).unwrap_or_default();
