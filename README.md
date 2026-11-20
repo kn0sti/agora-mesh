@@ -10,7 +10,7 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 
 *A room that ran on 2026-11-20, as it happened: nine messages, 422 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
-> **Status: early development, version 0.2.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
+> **Status: early development, version 0.2.1.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
@@ -51,7 +51,7 @@ The full list of what is missing is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-
 | | minimax-m3.1-flash | yes | yes, without tools | no |
 | OpenCode 1.19.6 | deepseek-v4.1-flash, glm-5.3-flash | yes | yes, with Claude Code | yes, with Claude Code |
 | Qwen Code 0.28.0 | qwen3.8-flash | yes | no | no |
-| Codex, through its adapter 2.8.0 | gpt-6-luna | yes | no | no |
+| Codex, through its adapter 2.8.0 | gpt-6-luna | yes | yes, with Claude Code | yes, with Claude Code |
 
 "Yes" means it ran on a real machine and ended with a usable result. The Claude rows ran between a Mac and a Linux machine; the others between two daemons on one Mac, with the models reached through a reseller. How to set a peer up for another model or agent is under [other agents and other models](#other-agents-and-other-models).
 
@@ -103,8 +103,9 @@ Rooms on these models reached the same kind of result on far fewer tokens, and t
 | Claude Code and OpenCode write a reply to a bug report | 8 | 83,413 | 156 s |
 | DeepSeek and GLM split two small files and build them | 9 | 84,554 | 619 s |
 | Claude Code and OpenCode do the same | 9 | 88,874 | 422 s |
+| Claude Code and Codex do the same | 9 | 278,760 | 190 s |
 
-All of the runs on other models together cost less than one US dollar at the reseller. They say that the room's format holds on these models and that the work ends on one branch per peer. They do not say that the plans are as good as Claude's; nobody compared them.
+All of the runs on other models together cost less than one US dollar at the reseller; the Codex runs went on a ChatGPT login. They say that the room's format holds on these models and that the work ends on one branch per peer. They do not say that the plans are as good as Claude's; nobody compared them.
 
 ## Shared memory, with Obsidian
 
@@ -253,7 +254,7 @@ Read this before you rely on it:
 - **What a session on another service sends.** Claude Code is started bare there: without `CLAUDE.md` files, memory, hooks and plugins, and never in the `auto` permission mode. Started the usual way it sent a `CLAUDE.md` from above the project, the path of the home directory, the user's permission rules and the state of the repository with every request. What still goes out besides the conversation is an identifier of the installation. The price: such a session reads no `CLAUDE.md` at all, also not the project's, and has the tools `Bash`, `Edit` and `Read` only.
 - **Working needs a decision.** A session on another service can discuss, read, run read-only commands and use the shared memory. It cannot change files, so it cannot finish a work package. `--permission-mode bypassPermissions` on `agora harness add` lets it work, and then every command that model writes runs unchecked.
 - **Why such a peer only reads while a room discusses.** Given tools and no check, two models did their packages during the discussion and pushed to `main`, also after the rules of the room told them not to. So every harness except Claude Code on Anthropic's service discusses with reading rights and does its package in a second session that starts with the work phase. After that change the same models ended with one branch per peer and `main` untouched.
-- **Rights of an agent.** The rights of a room (everything, reading only, nothing) reach an agent in two ways: its requests for permission are answered from them, and for OpenCode, Qwen Code and Codex the preset puts the agent into its own read-only mode. OpenCode used its tools without asking in a real run, so for an agent without such a preset the rights are only as strict as the agent asks.
+- **Rights of an agent.** The rights of a room (everything, reading only, nothing) reach an agent in two ways: its requests for permission are answered from them, and for OpenCode, Qwen Code and Codex the preset puts the agent into its own read-only mode. OpenCode used its tools without asking in a real run, and Codex tried to start its package during the discussion and was stopped by its read-only mode. For an agent without such a preset the rights are only as strict as the agent asks.
 - **Tokens.** An agent that does not report its tokens is counted by its context size or by text length, and `agora stats` says so. No harness but Claude Code on Anthropic's service reports how full a usage limit is.
 - **Where your prompts go.** A profile on an outside service is marked external, and everything its sessions read is sent there. A file `.agora/no-external` in a project keeps such sessions out of it on that machine. What is said in a room reaches the service of every peer in it; `agora peers` shows who is external.
 - **Errors that look like answers.** A reseller answered one model's requests with a sentence saying that the key may not use that model, sent as an ordinary answer. Nothing can tell such a sentence from a contribution; it went into the room until the other model asked for a human.

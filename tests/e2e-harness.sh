@@ -58,6 +58,8 @@ FAKE_ACP_USAGE=total a harness test agent > "$T/test-acp2" 2>&1
 check "a running total of tokens becomes a number per turn" 'grep -q "reported, 1000 read in the first turn, 1500 in the second" "$T/test-acp2"'
 FAKE_ACP_USAGE=turn a harness test agent > "$T/test-acp2b" 2>&1
 check "tokens reported per turn are taken as they are, cached input included" 'grep -q "reported, 1000 read in the first turn, 1040 in the second" "$T/test-acp2b"'
+FAKE_ACP_CANCEL=1 a harness test agent > "$T/test-acp2c" 2>&1
+check "an agent that gives up its turn when a tool is refused is asked again" 'grep -q "gave up its turn after a refusal" "$T/a/fake-acp.log" && grep -q "answers: *yes" "$T/test-acp2c" && grep -q "remembers the last turn: yes" "$T/test-acp2c"'
 FAKE_ACP_AUTH=1 a harness test agent > "$T/test-acp3" 2>&1
 check "an agent without a login says so" 'grep -q "needs a login first" "$T/test-acp3"'
 FAKE_ACP_FS=1 a harness test agent >/dev/null 2>&1

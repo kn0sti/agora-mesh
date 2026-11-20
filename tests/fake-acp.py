@@ -9,6 +9,9 @@ on stdin and stdout. It answers like tests/fake-claude.sh, without using tokens.
                       answer; "turn": reports the tokens of each turn;
                       "context" (default): reports only the context size;
                       "none": reports nothing
+  FAKE_ACP_CANCEL=1   asks for permission to run a command during the connection
+                      test and gives up its turn when refused, as Codex does;
+                      it answers when it is asked again
   FAKE_ACP_AUTH=1     refuses to open a session without a login
   FAKE_ACP_FS=1       asks the client to read a file for it; the reply goes to the log
 
@@ -99,6 +102,20 @@ def prompt(request):
     session = params["sessionId"]
     text = "".join(block.get("text", "") for block in params["prompt"])
     log("prompt rules=%d chars=%d" % (text.count("one of several equal peers"), len(text)))
+    if "was refused" in text and state.get("gave_up"):
+        # Asked again after a refusal: answer what was asked before.
+        text = state.pop("gave_up")
+    elif os.environ.get("FAKE_ACP_CANCEL") == "1" and "connection test" in text:
+        update(session, {"sessionUpdate": "tool_call", "toolCallId": "t9", "title": "write a file", "kind": "execute", "status": "pending"})
+        reply = ask_client(
+            "session/request_permission",
+            {"sessionId": session, "toolCall": {"toolCallId": "t9", "kind": "execute"}, "options": [{"optionId": "yes", "kind": "allow_once"}, {"optionId": "cancel", "kind": "reject_once"}]},
+        )
+        if reply.get("result", {}).get("outcome", {}).get("optionId") != "yes":
+            log("gave up its turn after a refusal")
+            state["gave_up"] = text
+            send({"jsonrpc": "2.0", "id": request["id"], "result": {"stopReason": "cancelled"}})
+            return
     if os.environ.get("FAKE_ACP_TOOL") == "1" and ("Your turn" in text or "Work phase. Package #" in text):
         say(session, "Let me look at the files first. ")
         update(session, {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "run a command", "kind": "execute", "status": "pending"})

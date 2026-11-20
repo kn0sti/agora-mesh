@@ -35,6 +35,8 @@ plt.rcParams.update({
     "font.family": ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
     "font.size": 11,
     "svg.fonttype": "path",
+    # The same input gives the same file, so that a rerun changes nothing in the repository.
+    "svg.hashsalt": "agora-mesh",
     "axes.spines.top": False,
     "axes.spines.right": False,
 })
@@ -48,7 +50,8 @@ MEASURED_ROOM_MIN = 108 / 60     # what the room took in total
 
 def save(fig, name, mode, t):
     for ext in ("svg", "png"):
-        fig.savefig(os.path.join(HERE, f"{name}-{mode}.{ext}"), dpi=200, facecolor=t["surface"])
+        metadata = {"Date": None} if ext == "svg" else None
+        fig.savefig(os.path.join(HERE, f"{name}-{mode}.{ext}"), dpi=200, facecolor=t["surface"], metadata=metadata)
     plt.close(fig)
 
 
@@ -368,24 +371,62 @@ def what_leaves(mode):
     save(fig, "what-leaves", mode, t)
 
 
-# A real room, message by message: docs/measurements/2026-11-real-agents.md,
-# "A work phase of two harnesses".
-ROOM = [
-    ("Mac", "BRIEF", "the goal, and what is known"),
-    ("Server", "KNOWN_MISSING", "what it knows, what it lacks"),
-    ("Mac", "ANSWER", "fills the gaps"),
-    ("Server", "PROPOSAL", "a first plan"),
-    ("Mac", "SPLIT_WORK", "one package per peer"),
-    ("Server", "CONSENSUS", "agreed"),
-    ("room", "WORK", "both work at the same time"),
-    ("Mac", "DONE", "docs/USAGE.md"),
-    ("Server", "DONE", "bin/greet.sh"),
-]
-PHASES = [(0, "A room is opened"), (1, "Briefing"), (4, "Discussion"), (7, "Work phase"), (10, "Result: one branch per peer")]
+# Real rooms, message by message. Each entry is one run from docs/measurements:
+# the two machines, what each message was, and what the room ended with.
+ROOMS = {
+    # 2026-11-real-agents.md, "A work phase of two harnesses".
+    "room-flow": dict(
+        left="Claude Code, bare, on DeepSeek", right="OpenCode on DeepSeek",
+        messages=[
+            ("Mac", "BRIEF", "the goal, and what is known"),
+            ("Server", "KNOWN_MISSING", "what it knows, what it lacks"),
+            ("Mac", "ANSWER", "fills the gaps"),
+            ("Server", "PROPOSAL", "a first plan"),
+            ("Mac", "SPLIT_WORK", "one package per peer"),
+            ("Server", "CONSENSUS", "agreed"),
+            ("room", "WORK", "both work at the same time"),
+            ("Mac", "DONE", "docs/USAGE.md"),
+            ("Server", "DONE", "bin/greet.sh"),
+        ],
+        summary="main untouched  ·  9 messages  ·  422 s",
+    ),
+    # 2026-11-real-agents.md, "A work phase with Codex".
+    "room-flow-codex": dict(
+        left="Claude Code, bare, on DeepSeek", right="Codex on gpt-6-luna",
+        messages=[
+            ("Mac", "BRIEF", "the goal, and what is known"),
+            ("Server", "KNOWN_MISSING", "what it knows, what it lacks"),
+            ("Mac", "ANSWER", "fills the gaps"),
+            ("Server", "PASS", "nothing to add yet"),
+            ("Mac", "SPLIT_WORK", "one package per peer"),
+            ("Server", "CONSENSUS", "agreed"),
+            ("room", "WORK", "both work at the same time"),
+            ("Mac", "DONE", "docs/USAGE.md"),
+            ("Server", "DONE", "bin/greet.sh"),
+        ],
+        summary="main untouched  ·  9 messages  ·  190 s",
+    ),
+    # 2026-11-claude-code-on-another-service.md, part 3, run 4.
+    "room-flow-deepseek": dict(
+        left="Claude Code, bare, on DeepSeek", right="Claude Code, bare, on DeepSeek",
+        messages=[
+            ("Mac", "BRIEF", "the goal, and what is known"),
+            ("Server", "KNOWN_MISSING", "what it knows, what it lacks"),
+            ("Mac", "ANSWER", "fills the gaps"),
+            ("Server", "SPLIT_WORK", "one package per peer"),
+            ("Mac", "CONSENSUS", "agreed"),
+            ("room", "WORK", "both work at the same time"),
+            ("Mac", "DONE", "bin/greet.sh"),
+            ("Server", "DONE", "docs/USAGE.md"),
+        ],
+        summary="main untouched  ·  8 messages  ·  351 s",
+    ),
+}
 
 
-def room_frame(shown, t):
-    """One picture of the room after `shown` messages; 10 shows the result too."""
+def room_frame(room, shown, t):
+    """One picture of a room after `shown` messages; one more shows the result too."""
+    messages = room["messages"]
     fig, ax = plt.subplots(figsize=(11, 6.6), dpi=100)
     fig.patch.set_facecolor(t["surface"])
     fig.subplots_adjust(left=0.02, right=0.98, top=0.88, bottom=0.02)
@@ -401,7 +442,7 @@ def room_frame(shown, t):
         ax.text(x, y, text, ha=ha, va="center", fontsize=size, fontweight=weight, color=colour or t["ink"], zorder=5)
 
     # The two machines.
-    for x, name, runs, colour in ((2, "Mac", "Claude Code, bare, on DeepSeek", t["s1"]), (70, "Server", "OpenCode on DeepSeek", t["s2"])):
+    for x, name, runs, colour in ((2, "Mac", room["left"], t["s1"]), (70, "Server", room["right"], t["s2"])):
         box(x, 49, 28, 9, t["page"], t["border"])
         ax.add_patch(Rectangle((x, 49), 0.9, 9, linewidth=0, facecolor=colour, zorder=3))
         label(x + 3, 55.2, name, size=13, weight="semibold", ha="left")
@@ -411,7 +452,7 @@ def room_frame(shown, t):
 
     # The messages, newest at the bottom.
     row = 4.55
-    for i, (who, kind, what) in enumerate(ROOM[:shown]):
+    for i, (who, kind, what) in enumerate(messages[:shown]):
         y = 44.2 - i * row
         if who == "Mac":
             x, face, edge = 4, t["wash1"], t["s1"]
@@ -419,44 +460,50 @@ def room_frame(shown, t):
             x, face, edge = 50, t["wash2"], t["s2"]
         else:
             x, face, edge = 27, t["wash3"], t["s3"]
-        newest = i == shown - 1 and shown <= len(ROOM)
+        newest = i == shown - 1 and shown <= len(messages)
         box(x, y - 1.75, 46, 3.5, face, edge, radius=1.0, width=2.0 if newest else 0.8)
         label(x + 1.6, y, f"#{i + 1}", size=9.5, colour=t["ink2"], ha="left")
         label(x + 6.2, y, kind, size=10, weight="semibold", ha="left")
         label(x + 24.5, y, what, size=9.5, colour=t["ink2"], ha="left")
 
     # The result: the branches the peers pushed.
-    if shown > len(ROOM):
-        y = 44.2 - len(ROOM) * row - 0.4
+    if shown > len(messages):
+        y = 44.2 - len(messages) * row - 0.4
         box(4, y - 2.3, 92, 4.6, t["page"], t["border"])
         label(6, y, "pushed:", size=10, colour=t["ink2"], ha="left")
         label(15, y, "agora/<room>/mac", size=10, weight="semibold", colour=t["ink"], ha="left")
         label(40, y, "agora/<room>/server", size=10, weight="semibold", colour=t["ink"], ha="left")
-        label(68, y, "main untouched  ·  9 messages  ·  422 s", size=10, colour=t["ink2"], ha="left")
+        label(68, y, room["summary"], size=10, colour=t["ink2"], ha="left")
 
-    phase = [name for start, name in PHASES if shown >= start][-1]
+    kinds = [kind for _, kind, _ in messages]
+    work = kinds.index("WORK") + 1
+    split = min(i + 1 for i, kind in enumerate(kinds) if kind not in ("BRIEF", "KNOWN_MISSING", "ANSWER"))
+    phases = [(0, "A room is opened"), (1, "Briefing"), (split, "Discussion"), (work, "Work phase"), (len(messages) + 1, "Result: one branch per peer")]
+    phase = [name for start, name in phases if shown >= start][-1]
     fig.text(0.03, 0.965, "A room, message by message", color=t["ink"], fontsize=16, fontweight="semibold", va="top")
     fig.text(0.97, 0.958, phase, color=t["ink2"], fontsize=12, va="top", ha="right")
     return fig
 
 
-def room_flow():
-    """The animation for the top of the README, and its last picture as a still."""
+def room_flows():
+    """An animation per room, and the last picture of each as a still."""
     from PIL import Image
 
     t = THEMES["light"]
-    frames = []
-    for shown in range(0, len(ROOM) + 2):
-        fig = room_frame(shown, t)
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=100, facecolor=t["surface"])
-        if shown == len(ROOM) + 1:
-            fig.savefig(os.path.join(HERE, "room-flow-light.png"), dpi=200, facecolor=t["surface"])
-        plt.close(fig)
-        buffer.seek(0)
-        frames.append(Image.open(buffer).convert("P", palette=Image.ADAPTIVE, colors=64))
-    durations = [1200] + [1000] * len(ROOM) + [5000]
-    frames[0].save(os.path.join(HERE, "room-flow.gif"), save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True)
+    for name, room in ROOMS.items():
+        count = len(room["messages"])
+        frames = []
+        for shown in range(0, count + 2):
+            fig = room_frame(room, shown, t)
+            buffer = io.BytesIO()
+            fig.savefig(buffer, format="png", dpi=100, facecolor=t["surface"])
+            if shown == count + 1:
+                fig.savefig(os.path.join(HERE, f"{name}-light.png"), dpi=200, facecolor=t["surface"])
+            plt.close(fig)
+            buffer.seek(0)
+            frames.append(Image.open(buffer).convert("P", palette=Image.ADAPTIVE, colors=64))
+        durations = [1200] + [1000] * count + [5000]
+        frames[0].save(os.path.join(HERE, f"{name}.gif"), save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True)
 
 
 if __name__ == "__main__":
@@ -467,5 +514,5 @@ if __name__ == "__main__":
         own_accounts(mode)
         harness_cost(mode)
         what_leaves(mode)
-    room_flow()
+    room_flows()
     print("wrote", sorted(f for f in os.listdir(HERE) if f.endswith((".svg", ".png", ".gif"))))

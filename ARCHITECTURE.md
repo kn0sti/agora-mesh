@@ -115,7 +115,7 @@ Every participating machine keeps the room's log under `rooms/<id>/log.md`.
 2. **Briefing.** The opener's session writes a briefing (`BRIEF`). Each joiner answers once with what it knows and what it lacks (`KNOWN_MISSING`). The opener fills the gaps (`ANSWER`). None of this counts against the budget.
 3. **Discussion.** The joiners speak in the order they were invited, then the opener, and so on. The next speaker is always the next peer after the last speaker that still has turns. Default budget: 6 turns per peer (`--turns`).
 4. **Close.** The room closes
-   - when every peer still taking part answered `CONSENSUS` to the proposal that stands: consensus. The author of that proposal has agreed by making it and need not say so; without a proposal everyone has to. At least one peer must have said `CONSENSUS`;
+   - when every peer still taking part answered `CONSENSUS` to the proposal that stands: consensus. The author of that proposal has agreed by making it and need not say so; without a proposal everyone has to. At least one peer must have said `CONSENSUS`. A new proposal makes every earlier answer stale: a `CONSENSUS` or a `PASS` was given to what stood before;
    - when the same holds with `PASS` counted too: nothing left to add;
    - when only one peer has turns left: turn budget used up;
    - when all sessions together have used more tokens than the token budget (default 5,000,000, `--tokens`; input tokens count in full, cache reads included);
@@ -203,7 +203,8 @@ A value `env:NAME`, `file:PATH` or `cmd:COMMAND` in `env` is looked up when a se
 4. The rules of the room are sent once, in front of the first message.
 5. `session/prompt` per turn. The contribution is the text the agent sent after its last tool call in that turn.
 6. `session/request_permission` is answered from the rights: refuse for `talk`, allow tools of the kinds `read`, `search` and `think` for `read`, allow for `full`. The option is chosen by its kind, never by its label. An agent that does not ask is not restrained by this: OpenCode ran its tools without a request in a real run. The presets for OpenCode, Qwen Code and Codex therefore name the agent's own read-only mode for `talk` and `read` (step 3); for other agents the two levels are only as strict as the agent asks.
-7. Stopping a turn kills the agent's process group, as for Claude Code.
+7. An agent that is refused a tool may give up its turn (stop reason `cancelled`); Codex does. It is then told that the tool was refused and asked for its contribution, once.
+8. Stopping a turn kills the agent's process group, as for Claude Code.
 
 **What a harness reports** decides what the room can do with it:
 
