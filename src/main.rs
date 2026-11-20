@@ -73,6 +73,9 @@ enum Cmd {
         /// full, read or talk: what this peer's sessions may do here. Unchanged if not given
         #[arg(long, default_value = "")]
         rights: String,
+        /// ask or auto: with ask, a work package from a room this peer opened waits for `agora go` here
+        #[arg(long, default_value = "")]
+        work: String,
     },
     /// Open a room, let the agents discuss, and print their result
     Discuss {
@@ -101,6 +104,15 @@ enum Cmd {
         /// Harness profile for this machine's session; default: see `agora harness list`
         #[arg(long, default_value = "")]
         harness: String,
+        /// Wait for your go once the peers agreed on a split, before anyone starts working
+        #[arg(long)]
+        approve: bool,
+        /// Minutes one work package may take
+        #[arg(long, default_value = "60")]
+        work_minutes: String,
+        /// Tokens of the work phase after which no further package is started; 0 for no cap
+        #[arg(long, default_value = "0")]
+        work_tokens: String,
     },
     /// Invite another peer into a running room you opened
     Invite { room: String, name: String },
@@ -208,6 +220,10 @@ enum Cmd {
         #[arg(long, default_value = "0")]
         turns: String,
     },
+    /// Let the work start: the split a room you opened agreed on, or the package that waits on this machine
+    Go { room: String },
+    /// End a room that waits for you without the work, or refuse the package that waits on this machine
+    Cancel { room: String },
     /// Follow a room's log
     Watch { room: String },
     /// Stop all rooms and their sessions on this machine
@@ -301,7 +317,7 @@ fn main() -> Result<()> {
         Cmd::Approve { name, level, rights } => call("approve", &[("name", name), ("level", level), ("rights", rights)]),
         Cmd::Reject { name } => call("reject", &[("name", name)]),
         Cmd::Revoke { name } => call("revoke", &[("name", name)]),
-        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean, model, harness } => call(
+        Cmd::Discuss { topic, with, turns, tokens, project, remember, lean, model, harness, approve, work_minutes, work_tokens } => call(
             "discuss",
             &[
                 ("topic", topic),
@@ -313,6 +329,9 @@ fn main() -> Result<()> {
                 ("lean", if lean { "1".into() } else { String::new() }),
                 ("model", model),
                 ("harness", harness),
+                ("approve", if approve { "1".into() } else { String::new() }),
+                ("work_minutes", work_minutes),
+                ("work_tokens", work_tokens),
                 ("cwd", cwd()),
             ],
         ),
@@ -351,7 +370,9 @@ fn main() -> Result<()> {
         }
         Cmd::Harness { action } => harness_cmd(action.unwrap_or(HarnessCmd::List)),
         Cmd::Wait { room } => call("wait", &[("room", room)]),
-        Cmd::Trust { name, level, rights } => call("trust", &[("name", name), ("level", level), ("rights", rights)]),
+        Cmd::Trust { name, level, rights, work } => call("trust", &[("name", name), ("level", level), ("rights", rights), ("work", work)]),
+        Cmd::Go { room } => call("go", &[("room", room)]),
+        Cmd::Cancel { room } => call("cancel", &[("room", room)]),
         Cmd::Rooms => call("rooms", &[]),
         Cmd::Accept { room } => call("accept", &[("room", room)]),
         Cmd::Decline { room } => call("decline", &[("room", room)]),

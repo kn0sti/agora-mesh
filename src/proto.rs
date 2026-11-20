@@ -15,6 +15,10 @@ pub struct Member {
     pub level: u8,
     /// "full", "read" or "talk".
     pub rights: String,
+    /// A work package from a room this peer opened waits for a human on this
+    /// machine before it is built here. Local policy, like level and rights.
+    #[serde(default)]
+    pub ask: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +106,16 @@ pub enum Msg {
     },
     /// Opener to joiner: work on this package now.
     #[serde(rename = "WORK")]
-    Work { room_id: String, package: u32, title: String, branch: String, taken_from: Option<String> },
+    Work {
+        room_id: String,
+        package: u32,
+        title: String,
+        branch: String,
+        taken_from: Option<String>,
+        /// How long the package may take; 0 from a peer that does not say.
+        #[serde(default)]
+        minutes: u32,
+    },
     /// A new version of a shared-memory entry.
     #[serde(rename = "MEM_PUT")]
     MemPut { entry: crate::memory::MemEntry },

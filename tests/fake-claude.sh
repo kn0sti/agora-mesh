@@ -55,6 +55,7 @@ while IFS= read -r line; do
     *"Write the briefing"*) answer "Goal: agree on a plan. Known: nothing yet." ;;
     *"First line: KNOWN_MISSING"*) answer "KNOWN_MISSING\\nI know the goal. I am missing the deadline. cwd=$(basename "$PWD")" ;;
     *"fill the gaps"*) answer "ANSWER\\nThe deadline is Friday." ;;
+    *"the work was not started"*) answer "PLAN: the agreed split, not started." ;;
     *"reached consensus"*) answer "FINAL: the agreed plan." ;;
     *"closes without consensus"*) answer "OVERVIEW: agreed nothing, disputed everything." ;;
     *"You join this room while it is running"*)

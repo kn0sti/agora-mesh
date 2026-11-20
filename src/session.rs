@@ -86,13 +86,24 @@ fn limit_wording(text: &str) -> bool {
 }
 
 /// What every session is told about the room it takes part in.
-fn rules(me: &str, others: &str, rights: &str) -> String {
-    let means = if rights == "talk" {
-        "You have no tools in this session: you cannot read files or run commands, so do not write tool calls; say what you would have to look up."
-    } else {
-        "The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
+fn rules(me: &str, others: &str, rights: &str, works_later: bool) -> String {
+    let tools = match rights {
+        "talk" => "You have no tools in this session: you cannot read files or run commands, so do not write tool calls; say what you would have to look up.",
+        "read" => "In this session you can only read files: you cannot change anything or run commands.",
+        _ => {
+            "The peers share a memory: `agora memory` lists it, `agora memory show <id>` prints an entry, and \
 `agora remember \"<text>\" --title \"<title>\" --importance high|normal|low` saves a fact every peer should keep."
+        }
     };
+    // A model that only sees what this session cannot do reports itself as
+    // blocked when the room agrees on work; one did, in a real run.
+    let later = if works_later {
+        " That is on purpose. If the room agrees on work, your package is done in a second session that has the tools for it, \
+so judge a split on its merits and do not report this session's missing tools as a problem."
+    } else {
+        ""
+    };
+    let means = format!("{tools}{later}");
     format!(
         "You are \"{me}\", one of several equal peers in an agora-mesh room. The other peers ({others}) are \
 coding agents on other machines with their own files and knowledge; a human may read along. \
@@ -161,7 +172,14 @@ impl Session {
     fn open(harness: Option<&str>, dir: &Path, me: &str, others: &str, rights: &str, model: Option<&str>, cancel: watch::Receiver<bool>, stderr: Stdio) -> Result<Session> {
         let (name, profile) = harness::resolve(harness)?;
         harness::allowed_in(&name, &profile, dir)?;
-        let rules = rules(me, others, rights);
+        // "lean" and "discuss" are the rights of a discussion whose work is
+        // done later, in a second session: no tools, or reading only.
+        let (rights, works_later) = match rights {
+            "lean" => ("talk", true),
+            "discuss" => ("read", true),
+            other => (other, false),
+        };
+        let rules = rules(me, others, rights, works_later);
         let mut notes = Vec::new();
         let mut session = if profile.kind == "acp" {
             let mut cmd = Command::new(&profile.command[0]);

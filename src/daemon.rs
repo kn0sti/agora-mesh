@@ -72,6 +72,8 @@ pub struct Shared {
     activity: Mutex<HashMap<String, u32>>,
     /// The program each other peer's sessions run in, as far as it said.
     harnesses: Mutex<HashMap<String, proto::Harness>>,
+    /// Rooms joined here in which a package waits for this machine's human.
+    waiting: Mutex<HashMap<String, String>>,
     /// Signs this machine's shared-memory entries.
     secret: SecretKey,
     /// Open connections by peer id, to report how a peer is reached.
@@ -106,6 +108,20 @@ impl Shared {
         for tx in self.conns.lock().unwrap().values() {
             let _ = tx.send(Msg::Busy { rooms, harness: harness.clone() });
         }
+    }
+
+    /// Whether a package from a room this peer opened waits for a human here.
+    pub fn asks_before_work(&self, peer: &str) -> bool {
+        self.state.lock().unwrap().networks.iter().flat_map(|n| n.peers.iter()).any(|m| m.id == peer && m.ask)
+    }
+
+    /// Notes or clears the package that waits for this machine's human in a room.
+    pub fn set_waiting(&self, room: &str, note: Option<String>) {
+        let mut waiting = self.waiting.lock().unwrap();
+        match note {
+            Some(note) => waiting.insert(room.to_string(), note),
+            None => waiting.remove(room),
+        };
     }
 
     pub fn notices_len(&self) -> usize {
@@ -359,6 +375,7 @@ pub async fn run() -> Result<()> {
         rooms: Mutex::new(HashMap::new()),
         capacity: Mutex::new(HashMap::new()),
         harnesses: Mutex::new(HashMap::new()),
+        waiting: Mutex::new(HashMap::new()),
         activity: Mutex::new(HashMap::new()),
         secret,
         links: Mutex::new(HashMap::new()),
@@ -817,16 +834,17 @@ fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>,
     }
     // Level and rights are local policy: keep what this machine decided for peers
     // it already knows, and start new ones at the defaults.
-    let known: HashMap<String, (u8, String)> = net.peers.iter().map(|m| (m.id.clone(), (m.level, m.rights.clone()))).collect();
+    let known: HashMap<String, (u8, String, bool)> = net.peers.iter().map(|m| (m.id.clone(), (m.level, m.rights.clone(), m.ask))).collect();
     let before: Vec<String> = net.peers.iter().map(|m| m.id.clone()).collect();
     net.peers = members
         .into_iter()
         .filter(|m| m.id != me)
         .map(|mut m| {
-            let (level, rights) = known.get(&m.id).cloned().unwrap_or((1, "full".into()));
+            let (level, rights, ask) = known.get(&m.id).cloned().unwrap_or((1, "full".into(), false));
             m.name = proto::clean_name(&m.name);
             m.level = level;
             m.rights = rights;
+            m.ask = ask;
             m
         })
         .collect();
@@ -847,7 +865,7 @@ fn set_members(shared: &Shared, from: &str, network: &str, members: Vec<Member>,
 }
 
 fn all_members(me: &str, my_name: &str, net: &Network) -> Vec<Member> {
-    let mut v = vec![Member { name: my_name.to_string(), id: me.to_string(), level: 1, rights: "full".into() }];
+    let mut v = vec![Member { name: my_name.to_string(), id: me.to_string(), level: 1, rights: "full".into(), ask: false }];
     v.extend(net.peers.iter().cloned());
     v
 }
@@ -879,7 +897,7 @@ async fn serve_control(shared: Arc<Shared>, stream: tokio::net::TcpStream, token
     let req: Request = serde_json::from_str(&line).context("malformed control request")?;
     let resp = if req.token != token {
         Response { ok: false, text: "wrong control token".into() }
-    } else if ["discuss", "wait", "say", "ask", "delegate"].contains(&req.cmd.as_str()) {
+    } else if ["discuss", "wait", "say", "go", "cancel", "ask", "delegate"].contains(&req.cmd.as_str()) {
         match waiting_command(&shared, &req).await {
             Ok(text) => Response { ok: true, text },
             Err(e) => Response { ok: false, text: e.to_string() },
@@ -957,7 +975,7 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                 let my_name = state.name.clone();
                 let net = state.network_mut(&p.network).ok_or_else(|| anyhow!("network is gone"))?;
                 net.peers.retain(|m| m.id != p.id);
-                net.peers.push(Member { name: name.clone(), id: p.id.clone(), level, rights: rights.clone() });
+                net.peers.push(Member { name: name.clone(), id: p.id.clone(), level, rights: rights.clone(), ask: false });
                 net.version += 1;
                 let out = (all_members(&shared.me, &my_name, net), net.version, my_name);
                 state.save()?;
@@ -1017,6 +1035,12 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             if rights.as_ref().is_some_and(|r| !["full", "read", "talk"].contains(&r.as_str())) {
                 bail!("rights must be one of full, read, talk");
             }
+            let ask = match req.args.get("work").map(String::as_str).filter(|w| !w.is_empty()) {
+                None => None,
+                Some("ask") => Some(true),
+                Some("auto") => Some(false),
+                Some(_) => bail!("work must be ask or auto"),
+            };
             let mut state = shared.state.lock().unwrap();
             let m = state.networks.iter_mut().flat_map(|n| n.peers.iter_mut()).find(|m| m.name == name).ok_or_else(|| anyhow!("no peer named \"{name}\""))?;
             if let Some(level) = level {
@@ -1025,7 +1049,11 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
             if let Some(rights) = rights {
                 m.rights = rights;
             }
-            let text = format!("\"{name}\" has level {} and rights {} on this machine.", m.level, m.rights);
+            if let Some(ask) = ask {
+                m.ask = ask;
+            }
+            let work = if m.ask { " A package from a room it opened waits for `agora go` here." } else { "" };
+            let text = format!("\"{name}\" has level {} and rights {} on this machine.{work}", m.level, m.rights);
             state.save()?;
             Ok(text)
         }
@@ -1252,12 +1280,38 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
             // If the room was waiting for this answer, return once it runs again,
             // so a following `agora wait` does not see the old question.
             if let Some(mut state) = state {
-                let paused = matches!(*state.borrow(), RoomState::Paused(_));
+                let paused = matches!(*state.borrow(), RoomState::Paused(_) | RoomState::Approval(_));
                 if paused {
                     let _ = tokio::time::timeout(Duration::from_secs(3), state.changed()).await;
                 }
             }
             Ok("Sent.".into())
+        }
+        "go" | "cancel" => {
+            let id = arg("room")?;
+            let go = req.cmd == "go";
+            let (tx, state, opened) = {
+                let rooms = shared.rooms.lock().unwrap();
+                let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
+                (room.tx.clone(), room.state.clone(), room.role == "opened")
+            };
+            let waits = match &state {
+                Some(state) => matches!(*state.borrow(), RoomState::Approval(_)) || (!go && matches!(*state.borrow(), RoomState::Paused(_))),
+                None => shared.waiting.lock().unwrap().contains_key(&id),
+            };
+            if !waits {
+                bail!("room {id} is not waiting for {}", if go { "a go" } else { "a human" });
+            }
+            tx.try_send(if go { RoomEvent::Go } else { RoomEvent::Cancel }).map_err(|_| anyhow!("the room is not taking messages right now"))?;
+            if let Some(mut state) = state {
+                let _ = tokio::time::timeout(Duration::from_secs(3), state.changed()).await;
+            }
+            Ok(match (go, opened) {
+                (true, true) => format!("The work starts. `agora wait {id}` prints the result."),
+                (true, false) => "The package is being built on this machine.".to_string(),
+                (false, true) => format!("The room closes without the work. `agora wait {id}` prints what was agreed."),
+                (false, false) => "Refused. The room is told.".to_string(),
+            })
         }
         other => bail!("unknown command: {other}"),
     }
@@ -1278,6 +1332,12 @@ async fn wait_room(id: &str, mut rx: watch::Receiver<RoomState>) -> Result<Strin
                     "[room {id} is paused: a human has to decide]\n{question}\n\nAnswer with `agora say {id} \"<answer>\"` (add `--turns N` to grant more turns), then run `agora wait {id}` for the result."
                 ));
             }
+            RoomState::Approval(split) => {
+                return Ok(format!(
+                    "[room {id} waits for your go: the peers agreed on this split]\n{split}\n\n`agora go {id}` starts the work as agreed. `agora say {id} \"<what to change>\"` sends it back to the peers. \
+`agora cancel {id}` closes the room without the work. Then run `agora wait {id}` for the result."
+                ));
+            }
             RoomState::Closed(Ok(text)) => return Ok(text),
             RoomState::Closed(Err(e)) => bail!("{e}"),
         }
@@ -1295,6 +1355,16 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let model = model_of(req)?;
     let harness = req.args.get("harness").filter(|h| !h.is_empty()).cloned();
     let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
+    let number = |key: &str, default: u64| -> Result<u64> {
+        match req.args.get(key).filter(|s| !s.is_empty()) {
+            Some(s) => s.parse().map_err(|_| anyhow!("{} must be a number", key.replace('_', "-"))),
+            None => Ok(default),
+        }
+    };
+    let work = room::WorkOptions { approve: req.args.get("approve").is_some_and(|v| v == "1"), minutes: number("work_minutes", 60)? as u32, tokens: number("work_tokens", 0)? };
+    if !(1..=600).contains(&work.minutes) {
+        bail!("work-minutes must be between 1 and 600");
+    }
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
     {
@@ -1349,7 +1419,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let note_topic = topic.clone();
     tokio::spawn(async move {
         // In a task of its own, so that the room is removed even if it panics.
-        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, harness, project, rx, state_tx.clone(), cancelled);
+        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, harness, work, project, rx, state_tx.clone(), cancelled);
         let result = tokio::spawn(run).await.unwrap_or_else(|e| Err(anyhow!("the room crashed: {e}")));
         if let Ok(text) = &result {
             event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
@@ -1406,8 +1476,15 @@ fn remember_project(shared: &Shared, dir: &str) -> Result<()> {
 
 fn rooms(shared: &Shared) -> String {
     let mut out = String::new();
+    let waiting = shared.waiting.lock().unwrap();
     for (id, r) in shared.rooms.lock().unwrap().iter() {
         out.push_str(&format!("room {id}  {}  {}\n", r.role, r.topic));
+        if r.state.as_ref().is_some_and(|s| matches!(*s.borrow(), RoomState::Approval(_))) {
+            out.push_str(&format!("    the agreed split waits for your go  (agora go {id})\n"));
+        }
+        if let Some(note) = waiting.get(id) {
+            out.push_str(&format!("    {note} waits for your go  (agora go {id}, or agora cancel {id})\n"));
+        }
     }
     for (id, i) in shared.invites.lock().unwrap().iter() {
         let from = i.participants.iter().find(|p| p.id == i.from).map(|p| p.name.as_str()).unwrap_or("?");
