@@ -267,7 +267,7 @@ Nothing is written into the user's `CLAUDE.md`. Monitors are an experimental Cla
 
 Releases: a tag `vX.Y.Z` makes `.github/workflows/release.yml` build the binary for seven targets, write `SHA256SUMS` and publish a GitHub release; the tag, `Cargo.toml` and `plugin.json` must carry the same version.
 
-Verified: `claude plugin validate` passes; the launcher against a local stand-in for a release (download, reuse, tampered binary refused, missing checksum refused); a session started with `--plugin-dir` finds `agora` and the skill. Not verified: a real release, installation from the marketplace, the hook and the monitor in an interactive session, Windows.
+Verified: `claude plugin validate` passes; the launcher against a local stand-in for a release (download, reuse, tampered binary refused, missing checksum refused); the release workflow built all seven binaries for `v0.1.0`; the plugin installs from the marketplace, and a session then finds `agora`, which downloads the released binary and runs it. The plugin adds about 130 tokens to every session. Not verified: the hook and the monitor in an interactive session, and every binary except the one for macOS on x64.
 
 ## 11. Measuring
 
@@ -297,6 +297,6 @@ Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, 
 | Profiles for one's own and other people's machines | level and rights are set per peer by hand |
 | Peers that are not Claude Code | a session is "text in, text out", so other command-line agents could be attached |
 
-Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; the release workflow.
+Not tested: traversal of a real NAT between two networks; Windows; a real usage limit (it was simulated; utilization and reset time were read from real sessions); the work phase's takeover with real sessions; an agent writing to the shared memory on its own; peers on different accounts.
 
 Known weak spots: a peer that is a member of two networks shared with the same peer uses one link, and member lists of the second network do not travel over it. An approved peer can still fill another peer's shared memory or its room queue; approval is the boundary, not a quota.

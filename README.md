@@ -4,7 +4,7 @@ A peer-to-peer mesh for Claude Code. It connects Claude Code on two or more mach
 
 No machine is the master. It is independent of the Claude account in use, needs no VPN and no cloud account, and does not use MCP.
 
-> **Status: early development.** Everything described here works between a Mac and a Linux machine, and the repository builds from source. No release has been published yet, so the one-line installation as a plugin does not work yet. [ARCHITECTURE.md](ARCHITECTURE.md) describes what is built and lists what is not.
+> **Status: early development.** Everything described here works between a Mac and a Linux machine, and it installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. Tested on macOS and Linux on x64; the other builds are untested. [ARCHITECTURE.md](ARCHITECTURE.md) describes what is built and lists what is not.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
@@ -102,11 +102,11 @@ Connect only machines and people you trust with a shell on your computer. Connec
 
 ## Install
 
-Once the first release is published, tell your Claude Code
+Tell your Claude Code
 
 > Install https://github.com/kn0sti/agora-mesh and help me set it up.
 
-or install the plugin yourself with `/plugin install agora-mesh --marketplace kn0sti/agora-mesh`; [INSTALL.md](INSTALL.md) has the steps. Until then, build from source with a stable Rust toolchain:
+or install the plugin yourself with `/plugin install agora-mesh --marketplace kn0sti/agora-mesh`; [INSTALL.md](INSTALL.md) has the steps. The first call of `agora` downloads the binary for your platform from the GitHub release and checks it against `SHA256SUMS`. Or build from source with a stable Rust toolchain:
 
 ```
 cargo build --release          # binary: target/release/agora
@@ -194,11 +194,12 @@ Check the terms of your Claude plan before one person runs several accounts. Sha
 
 | Works | Not yet |
 |---|---|
-| network with human approval, permanent links | a published release, so installation as a plugin |
+| network with human approval, permanent links | peers on different accounts are untested |
 | rooms: briefing, equal turns, budgets, pause for a human | resuming a room after its opener's daemon restarts |
 | splitting work, parallel work on branches, takeover at a usage limit | a review phase after the work phase |
 | `ask`, `delegate`, `review`, `peers` | Windows and NAT traversal are untested |
-| shared memory with live sync, Obsidian mirror, block list | the daemon as a system service |
+| shared memory with live sync, Obsidian in both directions, block list | the daemon as a system service |
+| installation as a plugin, prebuilt binaries | |
 
 The full list of what is missing and untested is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-built). Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
 
