@@ -95,13 +95,13 @@ b trust Mac --rights full >/dev/null
 
 # A room with a work phase: the agent does its package in a second session
 a stop >/dev/null; sleep 1; export FAKE_SPLIT=1; a status >/dev/null; unset FAKE_SPLIT
-wait_for 40 'a status | grep -q "Heimserver *online"'
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 : > "$T/b/fake-acp.log"
 a discuss "Build it" --with Heimserver --project none > "$T/room2b" 2>&1
 check "a room of Claude Code and an agent does the work it split" 'grep -q "closed: work finished;" "$T/room2b"'
 check "the agent works in a second session, and there it may use its tools" '[ "$(grep -c "^start" "$T/b/fake-acp.log")" = 2 ] && grep -q "\"optionId\": \"allow\"" "$T/b/fake-acp.log" && grep -q "\"optionId\": \"reject\"" "$T/b/fake-acp.log"'
 a stop >/dev/null; sleep 1; a status >/dev/null
-wait_for 40 'a status | grep -q "Heimserver *online"'
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 
 # The opener on another model service
 a discuss "Plan the docs" --with Heimserver --project none --harness deepseek --model fable > "$T/room3" 2>&1
