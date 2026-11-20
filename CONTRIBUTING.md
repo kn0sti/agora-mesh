@@ -35,7 +35,7 @@ AGORA_HOME=/tmp/b target/debug/agora setup --name B
 
 `AGORA_CLAUDE_ARGS="--model haiku"` keeps real sessions cheap while testing. The other environment variables are listed in `ARCHITECTURE.md`, section 2.
 
-The figures in the README are drawn by `python3 docs/img/make_figures.py` (needs matplotlib) from the numbers in `docs/measurements`. Change the numbers there and in the script together, and look at the images before committing them.
+The figures in the README, the animation included, are drawn by `python3 docs/img/make_figures.py` (needs matplotlib and Pillow) from the numbers in `docs/measurements`. Change the numbers there and in the script together, and look at the images before committing them.
 
 A change to how rooms behave should come with a check in one of the scripts. A claim that something works with real sessions should say so in the pull request, with what was run.
 
