@@ -6,6 +6,8 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="${1:-$HERE/../target/debug/agora}"
 T="$(mktemp -d)"
+# The repositories of this test name an origin on the internet; nothing here may go there.
+export GIT_ALLOW_PROTOCOL=file
 export AGORA_CLAUDE="$HERE/fake-claude.sh"
 a() { AGORA_HOME="$T/a" "$BIN" "$@"; }
 b() { AGORA_HOME="$T/b" "$BIN" "$@"; }
@@ -131,6 +133,7 @@ check "its package is handed over, branch included" 'grep -A1 "Mac · HANDOVER" 
 check "the taker finishes both packages" '[ "$(grep -c "Mac · DONE" "$LOG8")" = 2 ] && grep -q "closed: work finished;" "$T/out8"'
 check "the peer at its limit says what it leaves behind: the last commit, not pushed, and what is not committed" 'grep -A2 "Heimserver · LIMIT" "$LOG8" | grep -q "Checked on Heimserver: .agora/$ROOM8/heimserver. is at [0-9a-f]* Half the work and not pushed: it exists on that machine only.*wip.txt"'
 check "the taker is told so with the package" 'grep -q "got-the-note" "$LOG8"'
+check "the taker also looks at origin itself, and finds nothing there" 'grep -q "nothing-to-fetch" "$LOG8"'
 check "the peer is shown at its limit afterwards" 'a status | grep -q "Heimserver.*at its usage limit"'
 
 # 8b. A peer that had nothing to add before a proposal was made has not
@@ -207,6 +210,32 @@ check "one that still does not report has its package blocked, with what it said
 check "the room closes with that package open" 'grep -q "closed: work finished with open packages" "$T/out8h"'
 restart
 
+# 8i. A taker reads the branch from origin itself, so it knows what it can
+# fetch even if the first owner's machine says nothing, and the last commit's
+# "Next:" line tells it where to go on.
+git init -q --bare "$T/origin8i.git"
+for r in A B; do
+  git clone -q "$T/origin8i.git" "$T/repo8i$r" 2>/dev/null
+  git -C "$T/repo8i$r" -c user.name=t -c user.email=t@example.org commit -q --allow-empty -m start 2>/dev/null
+done
+git -C "$T/repo8iA" push -q origin HEAD 2>/dev/null
+b project add "$T/repo8iB" >/dev/null
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null; export FAKE_LIMIT=1 FAKE_COMMIT=2; b status >/dev/null; unset FAKE_LIMIT FAKE_COMMIT; both_online
+(cd "$T/repo8iA" && a discuss "Build, push, stop" --with Heimserver --turns 3 > "$T/out8i" 2>&1)
+LOG8I="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "the peer at its limit had pushed, and says so" 'grep -A2 "Heimserver · LIMIT" "$LOG8I" | grep -q "Half the work and pushed"'
+check "the taker reads from origin what it can fetch and what was to come next" 'grep -q "got-what-is-on-origin" "$LOG8I" && grep -q "closed: work finished;" "$T/out8i"'
+
+# 8j. The first peer to answer a proposal is its critic, once.
+a stop >/dev/null; b stop >/dev/null; sleep 1
+export FAKE_CRITIC=1; a status >/dev/null; unset FAKE_CRITIC; b status >/dev/null; both_online
+(cd "$T/repoA" && a discuss "Build, after a hard look" --with Heimserver --turns 3 > "$T/out8j" 2>&1)
+LOG8J="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "the first to answer a split is asked to pick holes in it" 'grep -A1 "Mac · CRITIQUE" "$LOG8J" | grep -q "Nobody owns the tests"'
+check "it is asked once: the room then agrees and works" '[ "$(grep -c "Mac · CRITIQUE" "$LOG8J")" = 1 ] && grep -q "Mac · CONSENSUS" "$LOG8J" && grep -q "closed: work finished;" "$T/out8j"'
+restart
+
 # 9. A lean room discusses without tools and starts a second session for the
 # work. If that one cannot start, the package is blocked; the session without
 # tools does not do the work instead, and the room goes on for the others.
@@ -239,7 +268,7 @@ check "its room still closes with a result" 'grep -q "closed: work finished with
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out8c out8c2 out8c4 out8d2 out8e out8f out8g out8h out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out8c out8c2 out8c4 out8d2 out8e out8f out8g out8h out8i out8j out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
   [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }

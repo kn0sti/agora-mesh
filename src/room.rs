@@ -183,6 +183,30 @@ fn memory_notes(shared: &Shared, seen: &mut usize) -> String {
 }
 
 /// What a session is told when it starts a work package.
+/// Added to the turn of the first peer that answers a proposal. Two sessions of
+/// one model agree fast; someone has to have looked for the hole.
+const CRITIC: &str = " You are the first to answer this proposal, so you are its critic. Before you agree, look for its weakest point: \
+an interface the packages do not agree on, work that overlaps or is missing, an assumption nobody checked, a result that cannot be verified. \
+If you find one, reply CRITIQUE and name it and what would fix it. If you find none, reply CONSENSUS and say in one line what you checked.";
+
+/// True if the newest proposal is someone else's and nobody but its author has answered it yet.
+fn is_critic(entries: &[Entry], me: &str) -> bool {
+    let Some(i) = entries.iter().rposition(|e| matches!(e.kind.as_str(), "PROPOSAL" | "SPLIT_WORK")) else { return false };
+    let author = &entries[i].from;
+    author != me && !entries[i + 1..].iter().any(|e| &e.from != author && own_words(&e.kind))
+}
+
+/// What a taker is told: what its own machine fetched from origin, and what
+/// the first owner's machine reported, if it still could.
+fn taker_note(fetch: bool, dir: &Path, branch: &str, reported: Option<&str>) -> Option<String> {
+    let fetched = fetch.then(|| project::origin_note(dir, branch));
+    match (fetched, reported) {
+        (Some(f), Some(r)) => Some(format!("{r} {f}")),
+        (Some(f), None) => Some(f),
+        (None, r) => r.map(str::to_string),
+    }
+}
+
 /// A session's report on a package: DONE or BLOCKED and the text, or nothing
 /// if the reply is neither. A reply that is no report is not a success.
 fn parse_report(reply: &str) -> Option<(String, String)> {
@@ -203,8 +227,8 @@ fn no_report(reply: &str) -> (String, String) {
 fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>, note: Option<&str>, has_repo: bool) -> String {
     let takeover = match taken_from {
         Some(from) => {
-            let state = note.map(|n| format!(" What its machine reported when it stopped: {n}")).unwrap_or_default();
-            format!(" This package was started by {from}, who reached a usage limit; continue their work.{state}")
+            let state = note.map(|n| format!(" What is known about its state: {n}")).unwrap_or_default();
+            format!(" This package was started by {from}, who could not finish it; continue their work.{state}")
         }
         None => String::new(),
     };
@@ -212,7 +236,8 @@ fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>
         format!(
             "Do the work now in this repository on the branch `{branch}`: fetch origin and switch to it if it exists there, \
 otherwise create it from the current HEAD. Commit your work on it and push it to origin if you are allowed to; \
-do that after every step that stands on its own, so that another peer can go on from the branch if you are stopped."
+do that after every step that stands on its own, so that another peer can go on from the branch if you are stopped. \
+End every commit message with a line `Next: <what is left of this package>`, or `Next: nothing` once it is finished."
         )
     } else {
         "This machine has no clone of a shared repository for this room, so describe your result in the reply instead of committing.".to_string()
@@ -506,7 +531,9 @@ and where relevant information can be found. This one message needs no kind on t
             previous = Some(speaker.id.clone());
             let (kind, text) = if speaker.id == self.me.id {
                 let left = self.budget[&speaker.id];
-                match self.own_turn(&format!("Your turn ({left} turns left).")).await {
+                // A room has one round of picking holes; a revised proposal is answered as usual.
+                let critic = if is_critic(&self.log, &self.me.id) && !self.log.iter().any(|e| e.kind == "CRITIQUE") { CRITIC } else { "" };
+                match self.own_turn(&format!("Your turn ({left} turns left).{critic}")).await {
                     Ok(reply) => proto::parse_kind(&reply, "PROPOSAL", &KINDS),
                     Err(e) if is_limit(&e) => ("LIMIT".to_string(), "usage limit reached".to_string()),
                     Err(e) => return Err(e),
@@ -714,7 +741,8 @@ A line that starts with \"Checked on\" was added by that machine's daemon from g
                 break;
             }
             let (i, kind, text) = if let Some(i) = mine {
-                let prompt = work_prompt(pkgs[i].id, &pkgs[i].title, &pkgs[i].branch, pkgs[i].taken_from.as_deref(), pkgs[i].note.as_deref(), self.has_project);
+                let note = taker_note(pkgs[i].taken_from.is_some() && self.has_project, &self.work_dir, &pkgs[i].branch, pkgs[i].note.as_deref());
+                let prompt = work_prompt(pkgs[i].id, &pkgs[i].title, &pkgs[i].branch, pkgs[i].taken_from.as_deref(), note.as_deref(), self.has_project);
                 let mut reply = self.work_turn(&prompt).await;
                 if reply.as_ref().is_ok_and(|r| parse_report(r).is_none()) {
                     reply = self.work_turn(NOT_A_REPORT).await;
@@ -1391,6 +1419,8 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
     // A package that waits for this machine's human, the packages they let
     // through, and events to look at again.
     let mut held: Option<(u32, RoomEvent)> = None;
+    // Somebody in this room has picked holes in a proposal already.
+    let mut criticized = false;
     let mut approved: HashSet<u32> = HashSet::new();
     let mut requeue: VecDeque<RoomEvent> = VecDeque::new();
     let room = invite.room_id.clone();
@@ -1429,6 +1459,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 if e.kind == "SPLIT_WORK" {
                     plan = e.text.clone();
                 }
+                criticized |= e.kind == "CRITIQUE";
                 if e.from == me && e.kind != "HUMAN" {
                     my_left = e.turns_left;
                     pending = None;
@@ -1444,7 +1475,8 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 } else if let Some(before) = catch_up.take() {
                     format!("Topic: {}{project_note}\n\nYou join this room while it is running. What was said before you joined:\n{before}\n\nYour turn ({my_left} turns left).", invite.topic)
                 } else {
-                    format!("Your turn ({my_left} turns left).")
+                    let critic = if !criticized && is_critic(&news, &me) { CRITIC } else { "" };
+                    format!("Your turn ({my_left} turns left).{critic}")
                 };
                 let prompt = format!("{}{}\n{ask}", memory_notes(&shared, &mut notice_idx), news.iter().map(render).collect::<Vec<_>>().join("\n"));
                 news.clear();
@@ -1461,6 +1493,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                         break Err(e);
                     }
                 };
+                criticized |= kind == "CRITIQUE";
                 let m = say(&mut said, kind, text, used(&session, &work_session), 0, None);
                 pending = Some(m.clone());
                 shared.send_to(&invite.from, m);
@@ -1483,6 +1516,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                     held = Some((package, RoomEvent::Remote(p, Msg::Work { room_id: invite.room_id.clone(), package, title, branch, taken_from, minutes, note: note_of_owner })));
                     continue;
                 }
+                let note = taker_note(taken_from.is_some() && has_clone, &work_dir, &branch, note.as_deref());
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), note.as_deref(), has_clone);
                 // Where the discussion session cannot change files, a second one does the work.
                 if split && work_session.is_none() {

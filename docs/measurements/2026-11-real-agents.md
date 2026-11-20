@@ -114,6 +114,20 @@ The result for the human still got one thing wrong. It said that the clones had 
 
 A room like this is slow for what it produces: three one-file packages took five to ten minutes and 350,000 to 400,000 tokens, most of them in the working sessions of the two agents that bring their own context. It shows that three harnesses can share a room, not that they should for a task of this size.
 
+## The critic
+
+Version 0.5.0 tells the first peer that answers a proposal to look for its weakest point before it agrees. Same tasks and scripts as above.
+
+| Room | What the critic said | What came of it | Messages, time, tokens |
+|---|---|---|---|
+| Two peers, Claude Code on deepseek-v4.1-flash | the two packages share an interface nobody pinned: `${1:-world}` and `${1-world}` differ for an empty first argument, and the usage file has to state one | the split was sent again with `${1-world}` pinned; the critic agreed and said what it had checked; both packages were built and pushed | 10, 145 s, 123,285 |
+| Three harnesses, first attempt | each of the three peers was critic of one proposal | 13 messages of proposal and objection, "turn budget used up" at three turns each, no work | 13, 175 s, 165,102 |
+| Three harnesses, one round per room | Codex: the usage file should also show `bash bin/greet.sh`, so that callers do not depend on an executable bit | one revised split, two agreements, three packages built and pushed; the test passes against the script | 14, 245 s, 287,356 |
+
+The first attempt with three peers is why a room has one round of picking holes and not one per proposal. Three rooms do not show that a critic makes results better; they show that an objection is raised where before the answer was "agreed", and what an unbounded version costs.
+
+In all of these rooms every commit ended with a `Next:` line, from all three harnesses, each time `Next: nothing`: the packages were one commit each. A handover that reads such a line from origin has only met scripted sessions.
+
 ## Not measured
 
 - Other agents the presets name: Gemini CLI, Kimi Code, Goose, Cline, Copilot CLI, Cursor CLI, MiniMax Code, Kiro, Mistral Vibe. Their commands come from documentation.

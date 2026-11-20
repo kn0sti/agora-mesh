@@ -92,7 +92,7 @@ check "--remember none keeps a result out of the memory" '! a memory | grep -q "
 a stop >/dev/null; b stop >/dev/null; sleep 1
 export FAKE_STUBBORN=1 FAKE_DELAY=0.3
 a status >/dev/null; b status >/dev/null
-wait_for 40 'a status | grep -q "Heimserver *online"'
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 a discuss "A long argument" --with Heimserver --turns 30 --remember none > "$T/out3" 2>&1 &
 wait_for 10 'a rooms | grep -q "^room "'
 ROOM3="$(a rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p')"
