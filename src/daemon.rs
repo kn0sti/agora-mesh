@@ -70,6 +70,8 @@ pub struct Shared {
     capacity: Mutex<HashMap<String, Capacity>>,
     /// How many rooms each other peer said it is working on.
     activity: Mutex<HashMap<String, u32>>,
+    /// The program each other peer's sessions run in, as far as it said.
+    harnesses: Mutex<HashMap<String, proto::Harness>>,
     /// Signs this machine's shared-memory entries.
     secret: SecretKey,
     /// Open connections by peer id, to report how a peer is reached.
@@ -100,8 +102,9 @@ impl Shared {
     /// Tells every connected peer how many rooms run here. Call after a change.
     pub fn announce_rooms(&self) {
         let rooms = self.rooms.lock().unwrap().len() as u32;
+        let harness = crate::harness::own_info();
         for tx in self.conns.lock().unwrap().values() {
-            let _ = tx.send(Msg::Busy { rooms });
+            let _ = tx.send(Msg::Busy { rooms, harness: harness.clone() });
         }
     }
 
@@ -228,7 +231,7 @@ fn sync_memory(shared: &Arc<Shared>, peer: &str) {
     let networks: Vec<String> =
         shared.state.lock().unwrap().networks.iter().filter(|n| n.peers.iter().any(|m| m.id == peer)).map(|n| n.id.clone()).collect();
     // What the peer shows for us in `agora peers`, then every entry we share.
-    let _ = tx.send(Msg::Busy { rooms: shared.rooms.lock().unwrap().len() as u32 });
+    let _ = tx.send(Msg::Busy { rooms: shared.rooms.lock().unwrap().len() as u32, harness: crate::harness::own_info() });
     if let Some(capacity) = shared.capacity_of(&shared.me) {
         let _ = tx.send(Msg::Status { capacity });
     }
@@ -355,6 +358,7 @@ pub async fn run() -> Result<()> {
         conns: Mutex::new(HashMap::new()),
         rooms: Mutex::new(HashMap::new()),
         capacity: Mutex::new(HashMap::new()),
+        harnesses: Mutex::new(HashMap::new()),
         activity: Mutex::new(HashMap::new()),
         secret,
         links: Mutex::new(HashMap::new()),
@@ -639,9 +643,14 @@ fn apply(shared: &Arc<Shared>, peer: &str, network: &str, tx: &mpsc::UnboundedSe
             }
             Ok(true)
         }
-        Msg::Busy { rooms } => {
+        Msg::Busy { rooms, harness } => {
             if is_live_member(shared, peer, tx) {
                 shared.activity.lock().unwrap().insert(peer.to_string(), rooms);
+                // Shown to a human, so only what can be printed safely is kept.
+                match harness.filter(|h| crate::harness::valid_name(&h.name) && h.model.as_deref().is_none_or(printable)) {
+                    Some(h) => shared.harnesses.lock().unwrap().insert(peer.to_string(), h),
+                    None => shared.harnesses.lock().unwrap().remove(peer),
+                };
             }
             Ok(true)
         }
@@ -1284,6 +1293,9 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     }
     let lean = req.args.get("lean").is_some_and(|v| v == "1");
     let model = model_of(req)?;
+    // Checked now, so that a wrong name fails before anyone is invited.
+    let harness = req.args.get("harness").filter(|h| !h.is_empty()).cloned();
+    crate::harness::resolve(harness.as_deref())?;
     let tokens: u64 = req.args.get("tokens").map(|s| s.parse()).transpose().map_err(|_| anyhow!("tokens must be a number"))?.unwrap_or(5_000_000);
     let with = req.args.get("with").cloned().unwrap_or_default();
     let mut joiners = Vec::new();
@@ -1333,7 +1345,7 @@ async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let note_topic = topic.clone();
     tokio::spawn(async move {
         // In a task of its own, so that the room is removed even if it panics.
-        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, project, rx, state_tx.clone(), cancelled);
+        let run = room::run_opener(sh.clone(), rid.clone(), topic, joiners, turns, tokens, lean, model, harness, project, rx, state_tx.clone(), cancelled);
         let result = tokio::spawn(run).await.unwrap_or_else(|e| Err(anyhow!("the room crashed: {e}")));
         if let Ok(text) = &result {
             event("room-closed", &format!("{rid}: {note_topic} (agora wait {rid})"));
@@ -1403,15 +1415,34 @@ fn rooms(shared: &Shared) -> String {
     out
 }
 
+/// Whether a short text from a peer can be shown as it is.
+fn printable(s: &str) -> bool {
+    s.len() <= 80 && s.chars().all(|c| c.is_ascii_graphic())
+}
+
 /// Everyone in this machine's networks at a glance: reachable or not, what
-/// it is working on, and how much of its usage limit is left.
+/// it is working on, which program its sessions run in, and how much of its
+/// usage limit is left.
 fn peers(shared: &Shared) -> String {
     let state = shared.state.lock().unwrap();
     let conns = shared.conns.lock().unwrap();
     let links = shared.links.lock().unwrap();
     let capacity = shared.capacity.lock().unwrap();
     let activity = shared.activity.lock().unwrap();
-    let limit = |id: &str| capacity.get(id).map(|c| c.describe()).unwrap_or_else(|| "limit unknown until a session has run there".into());
+    let harnesses = shared.harnesses.lock().unwrap();
+    let own = crate::harness::own_info();
+    let limit = |id: &str| {
+        let harness = if id == shared.me { own.as_ref() } else { harnesses.get(id) };
+        let cap = match (capacity.get(id), harness) {
+            (Some(c), _) => c.describe(),
+            (None, Some(h)) if !h.capacity => "its harness reports no usage limit".to_string(),
+            (None, _) => "limit unknown until a session has run there".to_string(),
+        };
+        match harness {
+            Some(h) if h.name != crate::harness::BUILTIN || h.model.is_some() => format!("{cap}  [{}]", h.describe()),
+            _ => cap,
+        }
+    };
     let busy = |n: u32| match n {
         0 => "idle".to_string(),
         1 => "working on 1 room".to_string(),
