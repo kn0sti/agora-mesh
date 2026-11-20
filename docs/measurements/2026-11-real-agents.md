@@ -1,0 +1,59 @@
+# Real agents over the Agent Client Protocol
+
+2026-11-20, macOS. The adapter for the Agent Client Protocol had only met a scripted agent. Here it drives three real ones: OpenCode, Qwen Code and Codex. `AGORA_ACP_TRACE=<file>` wrote down every message; the shapes below are read from those traces.
+
+OpenCode and Qwen Code ran on models of a reseller (OpenAI-compatible address), Codex on a ChatGPT login.
+
+## One session each
+
+`agora harness test`, two turns, rights `talk`:
+
+| | OpenCode 1.19.6 | Qwen Code 0.28.0 | Codex, adapter 2.8.0 |
+|---|---|---|---|
+| Started with | `npx -y opencode-ai acp` | `npx -y @qwen-code/qwen-code --acp` | `npx -y @agentclientprotocol/codex-acp` |
+| Model | deepseek-v4.1-flash | qwen3.8-flash | gpt-6-luna |
+| Answers, keeps to the room's format, remembers the turn before | yes, yes, yes | yes, yes, yes | yes, yes, yes |
+| Input tokens, first and second turn | 11,543 and 11,577 | 15,074 and 15,119 | 17,845 and 17,916 |
+| Time for both turns | 24.6 s | 30.0 s | 7.1 s |
+
+For comparison: a bare Claude Code session on another service read 350 to 750 input tokens in such a turn. An agent brings its own system prompt and tools, and nothing was done here to make it smaller.
+
+## What the agents send
+
+All three speak protocol version 1 and offer a model and a mode as config options, as the adapter expects. They differ in the rest:
+
+| | OpenCode | Qwen Code | Codex |
+|---|---|---|---|
+| Tokens at the end of a turn (`usage`) | yes, the tokens of the turn | no | yes, the tokens of the turn |
+| Context size (`usage_update`) | no | yes | yes |
+| Cached input | apart, as `cachedReadTokens` | | apart, as `cachedReadTokens` |
+| Modes | `build`, `plan` | `plan`, `default`, `auto-edit`, `auto`, `yolo` | `read-only`, `workspace-write`, `agent`, `agent-full-access` |
+| Mode it starts in | `build` | `auto` | `agent` |
+| Asked for permission before using a tool | no (in `build`) | not seen | not seen |
+| Usage limit | no | no | no; `_meta.quota` holds token counts only |
+
+Two things in the adapter came out of this:
+
+- **Tokens.** The protocol's draft describes `usage` as a total of the session, and the adapter read it so. OpenCode and Codex report the tokens of the turn; the first run showed 10,275 tokens for the first turn and 45 for the second. The adapter now tells the two ways of counting apart on the second report: a total grows by about a whole context, the tokens of a turn stay close to those of the turn before.
+- **Modes.** OpenCode used its tools without asking, so answering permission requests does not restrain it. The presets for these three agents now set the agent's own read-only mode for the rights `talk` and `read` (`plan`, `plan`, `read-only`); each accepted it in a real run. For an agent without such a preset the rights are only as strict as the agent asks.
+
+## A room of two harnesses
+
+Two daemons on one machine. One ran Claude Code, bare, on deepseek-v4.1-flash; the other ran OpenCode on glm-5.3-flash. `--turns 3`, no project, full rights.
+
+| | |
+|---|---|
+| Messages | 8: brief, known and missing, answer, proposal, critique, answer, consensus, consensus |
+| Result | consensus: a reply to a bug reporter in six sentences and what the maintainers check first |
+| Tokens | 83,413 in total: 29,754 on the Claude Code side, 53,659 on the OpenCode side |
+| Time | 156 s |
+| Tools | OpenCode read a file and ran two commands; the Claude Code session saved the result with `agora remember` |
+
+Rooms with a work phase on other models, and what they changed in a room, are in [2026-11-claude-code-on-another-service.md](2026-11-claude-code-on-another-service.md), part 3. Since then an agent, too, only reads while a room discusses and works in a second session; that was run with the scripted agent, not with a real one.
+
+## Not measured
+
+- Other agents the presets name: Gemini CLI, Kimi Code, Goose, Cline, Copilot CLI, Cursor CLI, MiniMax Code, Kiro, Mistral Vibe. Their commands come from documentation.
+- A work phase done by an agent over the protocol.
+- What a permission request of a real agent looks like: none of the three sent one.
+- Stopping a real agent in the middle of a turn.

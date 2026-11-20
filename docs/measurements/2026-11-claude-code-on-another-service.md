@@ -1,6 +1,6 @@
 # Claude Code on another model service
 
-2026-11-20. Claude Code 2.1.329 on macOS, started by `agora` on a harness profile. Two parts: what Claude Code sends, looked at with a local stand-in for a model service, and real rooms on four other models.
+2026-11-20. Claude Code 2.1.329 on macOS, started by `agora` on a harness profile. Three parts: what Claude Code sends, looked at with a local stand-in for a model service; real rooms on four other models; and rooms with a work phase, which changed how a room works.
 
 ## 1. What Claude Code sends
 
@@ -94,9 +94,44 @@ Room 1 was run before the two memory commands were allowed: its sessions tried `
 
 The reseller's balance went down by less than one US dollar over all of this; it does not show smaller steps.
 
+## 3. Rooms with a work phase
+
+Two daemons, each in its own clone of a throwaway repository with a bare origin, each on another model, the profiles added with `--permission-mode bypassPermissions`. The task: one peer writes a small shell script, the other a page of documentation for it; split the work and do it.
+
+### What went wrong first
+
+| Run | Models | What happened |
+|---|---|---|
+| 1 | deepseek-v4.1-flash, glm-5.3-flash | The peers agreed on a split and then did not wait for the work phase. Each did its package inside its next discussion turn, committed on `main` and pushed to the origin's `main`; one of them then edited the other's file. The result was correct. The room closed as "consensus" after 735 s, with no work phase and no branches. |
+| 2 | the same, after the rules said "do not change files, commit or push until a message starts the work phase" | The same, except that each pushed a branch of its own choosing instead of `main`. The rule was not kept. 1,280 s, "turn budget used up". |
+| 3 | deepseek-v4.1-flash twice, `--lean` | No tools in the discussion, so nothing could be changed early. But after one peer proposed the split and the other answered CONSENSUS, the proposer made a new proposal instead of saying CONSENSUS too, and the turns ran out. One session wrote a tool call as plain text into its contribution. |
+
+Two rules of a room did not survive these models: that a session with tools waits for the work phase, and that the author of a proposal confirms it with a CONSENSUS of its own.
+
+### What was changed
+
+- **A proposal is its author's agreement.** A room has reached consensus when every *other* peer answered CONSENSUS to the proposal that stands. This also ends every room one message earlier.
+- **A harness that nothing checks only reads while the room discusses.** Claude Code on Anthropic's service checks actions in its `auto` mode. On another service, and for agents over the Agent Client Protocol, the discussion session gets reading rights, and the work is done by a second session with tools that starts with the work phase and is told the agreed plan, as in a lean room.
+- **A session without tools is told so**, instead of being told about commands it cannot run.
+
+### After the change
+
+| | Run 4 | Run 5 |
+|---|---|---|
+| Models | deepseek-v4.1-flash twice | deepseek-v4.1-flash and glm-5.3-flash |
+| Messages | 8: brief, known and missing, answer, split, consensus, work, done, done | 9: the same with one more answer |
+| Branches in the origin | `agora/<room>/mac` with `bin/greet.sh`, `agora/<room>/server` with `docs/USAGE.md`; `main` untouched | the same |
+| The script | prints `Hello, world!` and `Hello, Ada!` | the same |
+| Tokens, both peers | 75,152 | 84,554 |
+| Time | 351 s | 619 s |
+
+Both rooms closed with "work finished" and a result for the human that names the two branches.
+
+One more thing from run 3's first attempt: the reseller answered one model's requests with a sentence saying that the key may not use that model, sent as an ordinary answer and not as an error. Neither Claude Code nor agora-mesh can tell such a sentence from a contribution; it went into the room three times before the other model asked for a human.
+
 ## Not measured
 
-- A work phase on another model: no session here changed a file.
 - The services of the providers themselves. The reseller may answer differently than DeepSeek, Z.ai, Alibaba or MiniMax do directly, and the presets for those were not run.
 - The larger models of these providers, and how good the results are compared with Claude's. Two rooms on small topics say that the format holds, not that the plans are as good.
-- Any agent over the Agent Client Protocol: that adapter has only run against the scripted agent in `tests/fake-acp.py`.
+- A task larger than two small files, and a package that needs a review.
+- Agents over the Agent Client Protocol are in [2026-11-real-agents.md](2026-11-real-agents.md).

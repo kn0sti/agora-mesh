@@ -2,11 +2,13 @@
 """Stand-in for a coding agent that speaks the Agent Client Protocol, version 1,
 on stdin and stdout. It answers like tests/fake-claude.sh, without using tokens.
 
-  FAKE_ACP_TOOL=1     before it answers "Your turn" it says a sentence, calls a
-                      tool and asks for permission; the outcome goes to the log
+  FAKE_ACP_TOOL=1     before it answers "Your turn" or works on a package it
+                      says a sentence, calls a tool and asks for permission;
+                      the outcome goes to the log
   FAKE_ACP_USAGE      "total": reports a running total of tokens with every
-                      answer; "context" (default): reports only the context
-                      size; "none": reports nothing
+                      answer; "turn": reports the tokens of each turn;
+                      "context" (default): reports only the context size;
+                      "none": reports nothing
   FAKE_ACP_AUTH=1     refuses to open a session without a login
   FAKE_ACP_FS=1       asks the client to read a file for it; the reply goes to the log
 
@@ -97,7 +99,7 @@ def prompt(request):
     session = params["sessionId"]
     text = "".join(block.get("text", "") for block in params["prompt"])
     log("prompt rules=%d chars=%d" % (text.count("one of several equal peers"), len(text)))
-    if os.environ.get("FAKE_ACP_TOOL") == "1" and "Your turn" in text:
+    if os.environ.get("FAKE_ACP_TOOL") == "1" and ("Your turn" in text or "Work phase. Package #" in text):
         say(session, "Let me look at the files first. ")
         update(session, {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "run a command", "kind": "execute", "status": "pending"})
         reply = ask_client(
@@ -124,6 +126,9 @@ def prompt(request):
         state["tokens_in"] += 1000 + 500 * (state["tokens_in"] > 0)
         state["tokens_out"] += 20
         result["usage"] = {"totalTokens": state["tokens_in"] + state["tokens_out"], "inputTokens": state["tokens_in"], "outputTokens": state["tokens_out"]}
+    elif usage == "turn":
+        state["tokens_in"] = 1000 + 40 * (state["tokens_in"] > 0)
+        result["usage"] = {"totalTokens": state["tokens_in"] + 5, "inputTokens": state["tokens_in"] - 300, "cachedReadTokens": 300, "outputTokens": 5}
     elif usage == "context":
         state["tokens_in"] += 700
         update(session, {"sessionUpdate": "usage_update", "used": state["tokens_in"], "size": 200000})

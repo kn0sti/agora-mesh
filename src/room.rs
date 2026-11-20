@@ -63,6 +63,16 @@ fn own_words(kind: &str) -> bool {
     matches!(kind, "BRIEF" | "ANSWER" | "PROPOSAL" | "CRITIQUE" | "QUESTION" | "SPLIT_WORK" | "PASS" | "CONSENSUS" | "NEED_HUMAN")
 }
 
+/// Whether the peers are done with the proposal that stands: everyone
+/// answered CONSENSUS, where its author need not answer its own proposal.
+/// At least one peer has to have said CONSENSUS, so that a proposal alone
+/// agrees nothing. With `or_pass`, PASS counts too: nobody has anything to add.
+fn agreed(active: &[&Participant], last_kind: &HashMap<String, String>, proposer: Option<&str>, or_pass: bool) -> bool {
+    let said = |p: &Participant, kind: &str| last_kind.get(&p.id).is_some_and(|k| k == kind);
+    active.iter().any(|p| said(p, "CONSENSUS") || (or_pass && said(p, "PASS")))
+        && active.iter().all(|p| said(p, "CONSENSUS") || (or_pass && said(p, "PASS")) || proposer == Some(p.id.as_str()))
+}
+
 /// An invitation that waits for `agora accept`.
 #[derive(Clone)]
 pub struct Invite {
@@ -220,6 +230,8 @@ struct Opener {
     /// Work a joiner has been sent and not reported on yet.
     assigned: HashMap<String, Msg>,
     lean: bool,
+    /// The discussion session of this machine cannot change files; a second session does its packages.
+    two_sessions: bool,
     model: Option<String>,
     /// The harness profile this machine's sessions of the room run on; its default if none.
     harness: Option<String>,
@@ -292,8 +304,19 @@ pub async fn run_opener(
     let others = joiners.iter().map(|j| j.name.as_str()).collect::<Vec<_>>().join(", ");
     // The session works in the project's clone; log and result stay in the room directory.
     let work_dir = project.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
-    // A lean room discusses without tools; see `work_turn` for the work phase.
-    let session = Session::start(harness.as_deref(), &work_dir, &me.name, &others, if lean { "talk" } else { "full" }, model.as_deref(), cancel.clone())?;
+    // A lean room discusses without tools. A harness that nothing checks
+    // discusses with reading rights only, so that it cannot start the work
+    // before the room agreed. In both cases `work_turn` starts a second
+    // session with tools for the work phase.
+    let split = lean || crate::harness::reads_while_discussing(harness.as_deref());
+    let discuss_rights = if lean {
+        "talk"
+    } else if split {
+        "read"
+    } else {
+        "full"
+    };
+    let session = Session::start(harness.as_deref(), &work_dir, &me.name, &others, discuss_rights, model.as_deref(), cancel.clone())?;
     for note in &session.notes {
         append(&dir, "log.md", &format!("Note: {note}\n"));
     }
@@ -326,6 +349,7 @@ pub async fn run_opener(
         said: HashMap::new(),
         assigned: HashMap::new(),
         lean,
+        two_sessions: split,
         model,
         harness,
         work_session: None,
@@ -399,6 +423,8 @@ and where relevant information can be found. This one message needs no kind on t
         let mut order: Vec<Participant> = self.joiners.clone();
         order.push(self.me.clone());
         let mut last_kind: HashMap<String, String> = HashMap::new();
+        // Who made the proposal that stands. Making a proposal is agreeing to it.
+        let mut proposer: Option<String> = None;
         let mut previous: Option<String> = None;
         let reason = loop {
             // Peers that joined late speak before the opener from now on.
@@ -449,8 +475,12 @@ and where relevant information can be found. This one message needs no kind on t
                     let found = proto::parse_packages(&text, &names);
                     self.plan = text.clone();
                     self.split = if found.is_empty() { None } else { Some(found.into_iter().map(|(i, t)| (order[i].id.clone(), t)).collect()) };
+                    proposer = Some(speaker.id.clone());
                 }
-                "PROPOSAL" => self.split = None,
+                "PROPOSAL" => {
+                    self.split = None;
+                    proposer = Some(speaker.id.clone());
+                }
                 _ => {}
             }
             let next = self.speaker_after(&order, Some(&speaker.id)).map(|p| p.id).filter(|id| *id != speaker.id);
@@ -460,9 +490,9 @@ and where relevant information can be found. This one message needs no kind on t
                 Some("a human has to decide")
             } else if active.len() < 2 {
                 Some("a peer reached its usage limit")
-            } else if active.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "CONSENSUS")) {
+            } else if agreed(&active, &last_kind, proposer.as_deref(), false) {
                 Some("consensus")
-            } else if active.iter().all(|p| last_kind.get(&p.id).is_some_and(|k| k == "PASS" || k == "CONSENSUS")) {
+            } else if agreed(&active, &last_kind, proposer.as_deref(), true) {
                 Some("nothing left to add")
             } else {
                 None
@@ -651,10 +681,10 @@ and where relevant information can be found. This one message needs no kind on t
         Ok(if all_done { "work finished" } else { "work finished with open packages" }.to_string())
     }
 
-    /// Our own package. In a lean room the discussion session has no tools, so a
+    /// Our own package. Where the discussion session cannot change files, a
     /// second session with tools does the work and is told the agreed plan.
     async fn work_turn(&mut self, prompt: &str) -> Result<String> {
-        if !self.lean {
+        if !self.two_sessions {
             return self.own_turn(prompt).await;
         }
         if self.work_session.is_none() {
@@ -1104,7 +1134,17 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     };
     let has_clone = clone.is_some();
     let work_dir = clone.unwrap_or_else(|| dir.clone());
-    let discuss_rights = if invite.lean { "talk" } else { invite.rights.as_str() };
+    // As on the opener's side: a harness that nothing checks only reads
+    // while the room discusses. A question or a task (`mode`) is not a
+    // discussion and keeps the rights it was given.
+    let split = invite.lean || (invite.mode.is_empty() && invite.rights == "full" && crate::harness::reads_while_discussing(None));
+    let discuss_rights = if invite.lean {
+        "talk"
+    } else if split {
+        "read"
+    } else {
+        invite.rights.as_str()
+    };
     let mut session = match Session::start(None, &work_dir, &my_name, &others, discuss_rights, invite.model.as_deref(), cancel.clone()) {
         Ok(s) => {
             for note in &s.notes {
@@ -1246,8 +1286,8 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                     continue;
                 }
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
-                // In a lean room the discussion session has no tools; a second one does the work.
-                if invite.lean && work_session.is_none() {
+                // Where the discussion session cannot change files, a second one does the work.
+                if split && work_session.is_none() {
                     match Session::start(None, &work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()) {
                         Ok(s) => work_session = Some(s),
                         Err(e) => {
@@ -1308,4 +1348,33 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
     let messages = std::fs::read_to_string(dir.join("log.md")).map(|l| l.lines().filter(|x| x.starts_with("[#")).count()).unwrap_or(0);
     write_stats(&dir, &invite.room_id, &invite.topic, "joined", &reason, messages, &session, None, started.elapsed());
     outcome.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proposal_is_its_authors_agreement() {
+        let (a, b, c) = (Participant { id: "a".into(), name: "A".into() }, Participant { id: "b".into(), name: "B".into() }, Participant { id: "c".into(), name: "C".into() });
+        let kinds = |pairs: &[(&str, &str)]| pairs.iter().map(|(p, k)| (p.to_string(), k.to_string())).collect::<HashMap<_, _>>();
+        // A proposes, B agrees: agreed, A does not have to answer itself.
+        assert!(agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "CONSENSUS")]), Some("a"), false));
+        // The same when A answered a question in between.
+        assert!(agreed(&[&a, &b], &kinds(&[("a", "ANSWER"), ("b", "CONSENSUS")]), Some("a"), false));
+        // A proposal alone agrees nothing, and neither does one that a peer criticised.
+        assert!(!agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL")]), Some("a"), false));
+        assert!(!agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "CRITIQUE")]), Some("a"), false));
+        // Three peers: every other peer has to agree.
+        assert!(!agreed(&[&a, &b, &c], &kinds(&[("a", "SPLIT_WORK"), ("b", "CONSENSUS")]), Some("a"), false));
+        assert!(agreed(&[&a, &b, &c], &kinds(&[("a", "SPLIT_WORK"), ("b", "CONSENSUS"), ("c", "CONSENSUS")]), Some("a"), false));
+        // A newer proposal replaces the older one: its author is no longer counted as agreeing.
+        assert!(!agreed(&[&a, &b, &c], &kinds(&[("a", "PROPOSAL"), ("b", "PROPOSAL"), ("c", "CONSENSUS")]), Some("b"), false));
+        // Without any proposal everyone has to say it, as before.
+        assert!(agreed(&[&a, &b], &kinds(&[("a", "CONSENSUS"), ("b", "CONSENSUS")]), None, false));
+        assert!(!agreed(&[&a, &b], &kinds(&[("a", "ANSWER"), ("b", "CONSENSUS")]), None, false));
+        // Nothing left to add: a pass in place of an agreement.
+        assert!(agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "PASS")]), Some("a"), true));
+        assert!(!agreed(&[&a, &b], &kinds(&[("a", "PROPOSAL"), ("b", "PASS")]), Some("a"), false));
+    }
 }

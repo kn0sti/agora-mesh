@@ -39,10 +39,10 @@ check "the asking side gets the result" 'grep -q "FINAL: the agreed plan." "$T/o
 LOG="$T/a/rooms/$ROOM/log.md"
 check "briefing comes first: BRIEF, KNOWN_MISSING, ANSWER" 'grep -q "#1 Mac · BRIEF" "$LOG" && grep -q "#2 Heimserver · KNOWN_MISSING" "$LOG" && grep -q "#3 Mac · ANSWER" "$LOG"'
 check "then equal turns, joiner first" 'grep -q "#4 Heimserver · PROPOSAL · 2 left" "$LOG" && grep -q "#5 Mac · PROPOSAL · 2 left" "$LOG"'
-check "both logs hold the same 7 messages" '[ "$(grep -c "^\[#" "$LOG")" = 7 ] && [ "$(grep -c "^\[#" "$T/b/rooms/$ROOM/log.md")" = 7 ]'
+check "both logs hold the same 6 messages" '[ "$(grep -c "^\[#" "$LOG")" = 6 ] && [ "$(grep -c "^\[#" "$T/b/rooms/$ROOM/log.md")" = 6 ]'
 check "the joiner has the result too" 'wait_for 5 "grep -q FINAL \"$T/b/rooms/$ROOM/result.md\""'
 check "rooms are gone after closing" 'wait_for 5 "a rooms | grep -q \"no rooms\" && b rooms | grep -q \"no rooms\""'
-check "tokens of all peers are added up (8 turns x 110)" 'grep -q "all peers: 880 tokens" "$T/out1"'
+check "tokens of all peers are added up (7 turns x 110)" 'grep -q "all peers: 770 tokens" "$T/out1"'
 check "agora wait returns the result of a closed room" 'a wait "$ROOM" | grep -q "FINAL: the agreed plan."'
 
 # 2. From level 2 on the invitation is accepted automatically; budgets end a stubborn discussion.
@@ -87,7 +87,7 @@ wait_for 30 'a status | grep -q "join request"'; a approve Laptop >/dev/null
 check "three peers form a full mesh" 'wait_for 30 "a status | grep -q \"Laptop *online\" && b status | grep -q \"Laptop *online\" && c status | grep -q \"Heimserver *online\""'
 c trust Mac --level 2 >/dev/null
 a discuss "Plan with three" --turns 3 > "$T/out5" 2>&1
-check "three peers reach consensus in 10 messages" 'grep -q "closed: consensus; 10 messages" "$T/out5"'
+check "three peers reach consensus in 9 messages" 'grep -q "closed: consensus; 9 messages" "$T/out5"'
 ROOM5="$(ls -t "$T/c/rooms" | head -1)"
 check "order is joiners, then opener" 'grep -q "#5 Heimserver · PROPOSAL" "$T/c/rooms/$ROOM5/log.md" && grep -q "#6 Laptop · PROPOSAL" "$T/c/rooms/$ROOM5/log.md" && grep -q "#7 Mac · PROPOSAL" "$T/c/rooms/$ROOM5/log.md"'
 
