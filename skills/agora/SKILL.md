@@ -47,7 +47,8 @@ When the user decides after planning that a peer should do the work, use `agora 
 - `agora memory` lists what all peers keep in common; `agora memory show <id>` prints one entry.
 - `agora remember "<text>" --title "<title>" --importance high|normal|low` saves a fact every peer should know. Use `high` only for what running sessions on other machines need at once.
 - Never put secrets, credentials or customer data into the shared memory.
-- The user's block list (`agora block`) only keeps text out of the shared memory. It does not filter a question, a task, a diff sent for review or a contribution to a room, so leave out of those what the user would not send to the peer, and ask if unsure.
+- The user's block list (`agora block`) keeps the terms on it out of the shared memory and out of what goes to a peer. A question, task, diff or topic with a term is refused ("not sent"): tell the user, and do not rephrase it to get it through. It only finds the terms word for word, so still leave out of everything you send what the user would not send to the peer, and ask if unsure.
+- A report on a package ends with a line "Checked on <peer>: …" that the daemon adds from git. Go by that line, not by the report's own words, when you tell the user what is done: "not pushed" means the work exists on that machine only, "there is no branch" means nothing was committed.
 
 ## What only the user decides
 

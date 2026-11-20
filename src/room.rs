@@ -183,15 +183,36 @@ fn memory_notes(shared: &Shared, seen: &mut usize) -> String {
 }
 
 /// What a session is told when it starts a work package.
-fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>, has_repo: bool) -> String {
+/// A session's report on a package: DONE or BLOCKED and the text, or nothing
+/// if the reply is neither. A reply that is no report is not a success.
+fn parse_report(reply: &str) -> Option<(String, String)> {
+    let (kind, text) = proto::parse_kind(reply, "", &["DONE", "BLOCKED"]);
+    if kind.is_empty() { None } else { Some((kind, text)) }
+}
+
+/// Said once to a session whose reply was no report. In a real run a model
+/// wrote a tool call as text in place of using the tool; that counted as done.
+const NOT_A_REPORT: &str = "That was not a report: it did not start with DONE or BLOCKED. If you meant to use a tool, use it now and finish the package. \
+Then reply with DONE or BLOCKED on the first line and the report after it.";
+
+fn no_report(reply: &str) -> (String, String) {
+    let shown: String = reply.chars().take(400).collect();
+    ("BLOCKED".to_string(), format!("The session did not report on the package. Its last reply:\n{shown}"))
+}
+
+fn work_prompt(package: u32, title: &str, branch: &str, taken_from: Option<&str>, note: Option<&str>, has_repo: bool) -> String {
     let takeover = match taken_from {
-        Some(from) => format!(" This package was started by {from}, who reached a usage limit; continue their work."),
+        Some(from) => {
+            let state = note.map(|n| format!(" What its machine reported when it stopped: {n}")).unwrap_or_default();
+            format!(" This package was started by {from}, who reached a usage limit; continue their work.{state}")
+        }
         None => String::new(),
     };
     let how = if has_repo {
         format!(
             "Do the work now in this repository on the branch `{branch}`: fetch origin and switch to it if it exists there, \
-otherwise create it from the current HEAD. Commit your work on it and push it to origin if you are allowed to."
+otherwise create it from the current HEAD. Commit your work on it and push it to origin if you are allowed to; \
+do that after every step that stands on its own, so that another peer can go on from the branch if you are stopped."
         )
     } else {
         "This machine has no clone of a shared repository for this room, so describe your result in the reply instead of committing.".to_string()
@@ -301,6 +322,8 @@ struct Pkg {
     state: PkgState,
     /// Name of the peer that started the package, after a handover.
     taken_from: Option<String>,
+    /// What that peer's machine reported about the branch when it stopped.
+    note: Option<String>,
 }
 
 /// Runs a room from invitation to result. Returns the text for the human who asked.
@@ -570,7 +593,8 @@ and where relevant information can be found. This one message needs no kind on t
         // Stopped before the work: what the peers agreed on is still the result.
         let held = reason.starts_with("a human stopped") || reason.starts_with("nobody gave the go");
         let ask = if reason.starts_with("work") {
-            "The work phase is over. Write the result for the human who asked: per package what was done and on which branch, what is blocked or left, and how to review and merge it. No kind on the first line."
+            "The work phase is over. Write the result for the human who asked: per package what was done and on which branch, what is blocked or left, and how to review and merge it. \
+A line that starts with \"Checked on\" was added by that machine's daemon from git; where it and a report or an earlier message disagree, go by that line. No kind on the first line."
         } else if held {
             "The room agreed on a split of the work, and the work was not started. Write the agreed plan for the human who asked: the packages, who would do which, and what was agreed about them. No kind on the first line."
         } else if reason == "consensus" {
@@ -638,7 +662,7 @@ and where relevant information can be found. This one message needs no kind on t
             .enumerate()
             .map(|(i, (owner, title))| {
                 let branch = format!("agora/{}/{}", self.room_id, self.participant(&owner).name.to_lowercase());
-                Pkg { id: i as u32 + 1, owner, title, branch, state: PkgState::Open, taken_from: None }
+                Pkg { id: i as u32 + 1, owner, title, branch, state: PkgState::Open, taken_from: None, note: None }
             })
             .collect();
         let list = pkgs.iter().map(|p| format!("#{} {}: {} (branch {})", p.id, self.participant(&p.owner).name, p.title, p.branch)).collect::<Vec<_>>().join("\n");
@@ -681,7 +705,7 @@ and where relevant information can be found. This one message needs no kind on t
                     mine = Some(i);
                 } else {
                     let p = &pkgs[i];
-                    let work = Msg::Work { room_id: self.room_id.clone(), package: p.id, title: p.title.clone(), branch: p.branch.clone(), taken_from: p.taken_from.clone(), minutes: self.work.minutes };
+                    let work = Msg::Work { room_id: self.room_id.clone(), package: p.id, title: p.title.clone(), branch: p.branch.clone(), taken_from: p.taken_from.clone(), minutes: self.work.minutes, note: p.note.clone() };
                     self.assigned.insert(owner.clone(), work.clone());
                     self.shared.send_to(&owner, work);
                 }
@@ -690,13 +714,23 @@ and where relevant information can be found. This one message needs no kind on t
                 break;
             }
             let (i, kind, text) = if let Some(i) = mine {
-                let prompt = work_prompt(pkgs[i].id, &pkgs[i].title, &pkgs[i].branch, pkgs[i].taken_from.as_deref(), self.has_project);
-                match self.work_turn(&prompt).await {
+                let prompt = work_prompt(pkgs[i].id, &pkgs[i].title, &pkgs[i].branch, pkgs[i].taken_from.as_deref(), pkgs[i].note.as_deref(), self.has_project);
+                let mut reply = self.work_turn(&prompt).await;
+                if reply.as_ref().is_ok_and(|r| parse_report(r).is_none()) {
+                    reply = self.work_turn(NOT_A_REPORT).await;
+                }
+                let facts = || project::branch_facts(&self.work_dir, &pkgs[i].branch);
+                match reply {
                     Ok(reply) => {
-                        let (kind, text) = proto::parse_kind(&reply, "DONE", &["DONE", "BLOCKED"]);
+                        let (kind, text) = parse_report(&reply).unwrap_or_else(|| no_report(&reply));
+                        // What git says goes with the report, so that "done" is not taken on trust.
+                        let text = if kind == "DONE" && self.has_project { format!("{text}\n{}", project::check_line(&self.me.name, &pkgs[i].branch, &facts())) } else { text };
                         (i, kind, text)
                     }
-                    Err(e) if is_limit(&e) => (i, "LIMIT".to_string(), "usage limit reached".to_string()),
+                    Err(e) if is_limit(&e) => {
+                        let note = if self.has_project { format!("\n{}", project::handover_note(&self.me.name, &pkgs[i].branch, &facts())) } else { String::new() };
+                        (i, "LIMIT".to_string(), format!("usage limit reached{note}"))
+                    }
                     // Stopped by a human: the whole room ends.
                     Err(e) if *self.cancel.borrow() => return Err(e),
                     // Anything else blocks this package only; the other peers go on working.
@@ -727,6 +761,8 @@ and where relevant information can be found. This one message needs no kind on t
                 "LIMIT" => {
                     self.limited.insert(owner.id.clone());
                     self.publish(&owner, "LIMIT", &format!("{head}: {text}"), None);
+                    // What its machine said about the branch goes to whoever takes the package.
+                    pkgs[i].note = text.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|n| !n.is_empty());
                     self.reassign(&mut pkgs, i, "reached its usage limit");
                 }
                 "BLOCKED" => {
@@ -1036,7 +1072,8 @@ and where relevant information can be found. This one message needs no kind on t
     /// Takes a turn with our own session: new messages since its last turn, then `ask`.
     async fn own_turn(&mut self, ask: &str) -> Result<String> {
         self.drain()?;
-        let mut news: String = self.log[self.seen..].iter().filter(|e| e.kind != "TURN" && !(e.from == self.me.id && own_words(&e.kind))).map(render).collect::<Vec<_>>().join("\n");
+        // Asked twice without a log entry in between, there is nothing new to tell.
+        let mut news: String = self.log[self.seen.min(self.log.len())..].iter().filter(|e| e.kind != "TURN" && !(e.from == self.me.id && own_words(&e.kind))).map(render).collect::<Vec<_>>().join("\n");
         self.seen = self.log.len();
         news = format!("{}{news}", memory_notes(&self.shared, &mut self.notice_idx));
         let reply = self.session.turn(&format!("{news}\n{ask}")).await;
@@ -1070,6 +1107,14 @@ and where relevant information can be found. This one message needs no kind on t
                 let me = self.me.clone();
                 self.grant(extra);
                 self.publish_human(&me, &text);
+            }
+            // A package waits for a human on the machine it was sent to.
+            RoomEvent::Remote(p, Msg::Say { kind, text, n, .. }) if kind == "HOLD" => {
+                if let Some(j) = self.joiners.iter().find(|j| j.id == p).cloned() {
+                    if self.fresh(&p, n) {
+                        self.publish(&j, "HOLD", &text, None);
+                    }
+                }
             }
             RoomEvent::Remote(p, Msg::Say { kind, text, extra_turns, n, .. }) if kind == "HUMAN" => {
                 if let Some(j) = self.joiners.iter().find(|j| j.id == p).cloned() {
@@ -1420,7 +1465,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 pending = Some(m.clone());
                 shared.send_to(&invite.from, m);
             }
-            Some(RoomEvent::Remote(p, Msg::Work { package, title, branch, taken_from, minutes, .. })) if p == invite.from => {
+            Some(RoomEvent::Remote(p, Msg::Work { package, title, branch, taken_from, minutes, note, .. })) if p == invite.from => {
                 // Asked again for a package we already reported on: repeat the report.
                 if let Some(m) = reports.get(&package) {
                     shared.send_to(&invite.from, m.clone());
@@ -1428,14 +1473,17 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 }
                 // The human of this machine wants to see a package before it is built here.
                 if !approved.contains(&package) && shared.asks_before_work(&invite.from) {
+                    let note_of_owner = note;
                     let note = format!("package #{package} \"{title}\" on branch {branch}");
                     shared.set_waiting(&invite.room_id, Some(note.clone()));
                     crate::daemon::event("work-waiting", &format!("{}: {note} waits for a go on this machine (agora go {})", invite.room_id, invite.room_id));
                     append(&dir, "log.md", &format!("Waiting for a human on this machine: {note}\n"));
-                    held = Some((package, RoomEvent::Remote(p, Msg::Work { room_id: invite.room_id.clone(), package, title, branch, taken_from, minutes })));
+                    let m = say(&mut said, "HOLD".to_string(), format!("{note} waits for a human on {my_name}"), used(&session, &work_session), 0, None);
+                    shared.send_to(&invite.from, m);
+                    held = Some((package, RoomEvent::Remote(p, Msg::Work { room_id: invite.room_id.clone(), package, title, branch, taken_from, minutes, note: note_of_owner })));
                     continue;
                 }
-                let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
+                let task = work_prompt(package, &title, &branch, taken_from.as_deref(), note.as_deref(), has_clone);
                 // Where the discussion session cannot change files, a second one does the work.
                 if split && work_session.is_none() {
                     match Session::start(None, &work_dir, &my_name, &others, &invite.rights, invite.model.as_deref(), cancel.clone()) {
@@ -1461,13 +1509,24 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 news.clear();
                 let worker = work_session.as_mut().unwrap_or(&mut session);
                 worker.timeout = if minutes > 0 { Duration::from_secs(minutes as u64 * 60) } else { WORK_TIMEOUT };
-                let turn = worker.turn(&prompt).await;
+                let mut turn = worker.turn(&prompt).await;
+                if turn.as_ref().is_ok_and(|r| parse_report(r).is_none()) {
+                    turn = worker.turn(NOT_A_REPORT).await;
+                }
                 if let Some(c) = worker.capacity {
                     shared.report_capacity(c);
                 }
+                let facts = || project::branch_facts(&work_dir, &branch);
                 let (kind, text) = match turn {
-                    Ok(r) => proto::parse_kind(&r, "DONE", &["DONE", "BLOCKED"]),
-                    Err(e) if is_limit(&e) => ("LIMIT".to_string(), "usage limit reached".to_string()),
+                    Ok(r) => {
+                        let (kind, text) = parse_report(&r).unwrap_or_else(|| no_report(&r));
+                        // What git says goes with the report, so that "done" is not taken on trust.
+                        if kind == "DONE" && has_clone { (kind, format!("{text}\n{}", project::check_line(&my_name, &branch, &facts()))) } else { (kind, text) }
+                    }
+                    Err(e) if is_limit(&e) => {
+                        let state = if has_clone { format!("\n{}", project::handover_note(&my_name, &branch, &facts())) } else { String::new() };
+                        ("LIMIT".to_string(), format!("usage limit reached{state}"))
+                    }
                     Err(e) => ("BLOCKED".to_string(), format!("the session failed: {e}")),
                 };
                 let m = say(&mut said, kind, text, used(&session, &work_session), 0, Some(package));

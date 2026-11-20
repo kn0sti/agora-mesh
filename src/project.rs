@@ -77,3 +77,73 @@ mod tests {
         assert_ne!(normalize("git@github.com:owner/other.git"), want);
     }
 }
+
+/// What git says about a package's branch in a clone, so that a report on a
+/// package need not be taken on trust.
+pub struct BranchFacts {
+    /// Short hash and subject of the branch's last commit; none if the branch does not exist here.
+    pub head: Option<String>,
+    /// The branch is on origin with the same commit, as far as this clone knows.
+    pub pushed: bool,
+    /// Changed files that are not committed.
+    pub uncommitted: Vec<String>,
+    /// The last commits of the branch, newest first.
+    pub commits: Vec<String>,
+}
+
+pub fn branch_facts(dir: &Path, branch: &str) -> BranchFacts {
+    let local = git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]);
+    let remote = git(dir, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]);
+    let lines = |out: Option<String>| out.map(|o| o.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    BranchFacts {
+        head: local.as_ref().and_then(|_| git(dir, &["log", "-1", "--format=%h %s", branch])),
+        pushed: local.is_some() && local == remote,
+        uncommitted: lines(git(dir, &["status", "--short"])).into_iter().take(8).collect(),
+        commits: if local.is_some() { lines(git(dir, &["log", "-4", "--format=%h %s", branch])) } else { vec![] },
+    }
+}
+
+/// One line for a report that says its package is done.
+pub fn check_line(who: &str, branch: &str, f: &BranchFacts) -> String {
+    let branch_part = match (&f.head, f.pushed) {
+        (None, _) => format!("there is no branch `{branch}` in its clone, so nothing was committed for this package"),
+        (Some(head), true) => format!("`{branch}` is at {head} and pushed"),
+        (Some(head), false) => format!("`{branch}` is at {head} and not pushed: it exists on that machine only"),
+    };
+    let rest = match f.uncommitted.len() {
+        0 => String::new(),
+        1 => "; 1 changed file in that clone is not committed".to_string(),
+        n => format!("; {n} changed files in that clone are not committed"),
+    };
+    format!("Checked on {who}: {branch_part}{rest}.")
+}
+
+/// What the taker of a package is told about the state its first owner left it in.
+pub fn handover_note(who: &str, branch: &str, f: &BranchFacts) -> String {
+    let mut note = check_line(who, branch, f);
+    if f.commits.len() > 1 {
+        note.push_str(&format!(" Its last commits: {}.", f.commits.join("; ")));
+    }
+    if !f.uncommitted.is_empty() {
+        note.push_str(&format!(" Not committed, and so not available to anyone else: {}.", f.uncommitted.join(", ")));
+    }
+    note
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use super::*;
+
+    #[test]
+    fn a_report_says_what_git_says() {
+        let none = BranchFacts { head: None, pushed: false, uncommitted: vec![], commits: vec![] };
+        assert!(check_line("Mac", "agora/r/mac", &none).contains("there is no branch `agora/r/mac`"));
+        let local = BranchFacts { head: Some("abc1234 Add it".into()), pushed: false, uncommitted: vec![" M a.rs".into()], commits: vec!["abc1234 Add it".into(), "def5678 Start".into()] };
+        let line = check_line("Mac", "agora/r/mac", &local);
+        assert!(line.contains("is at abc1234 Add it and not pushed") && line.contains("; 1 changed file in that clone is not committed."));
+        let note = handover_note("Mac", "agora/r/mac", &local);
+        assert!(note.contains("Its last commits: abc1234 Add it; def5678 Start.") && note.contains("not available to anyone else:  M a.rs."));
+        let pushed = BranchFacts { head: Some("abc1234 Add it".into()), pushed: true, uncommitted: vec![], commits: vec!["abc1234 Add it".into()] };
+        assert_eq!(check_line("Mac", "b", &pushed), "Checked on Mac: `b` is at abc1234 Add it and pushed.");
+    }
+}

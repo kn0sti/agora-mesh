@@ -115,19 +115,22 @@ check "a consensus on SPLIT_WORK starts the work phase" 'grep -q "closed: work f
 check "each peer reports its own package" 'grep -q "Heimserver · DONE" "$LOG7" && grep -q "Mac · DONE" "$LOG7"'
 check "each package gets a branch per peer" 'grep -q "branch agora/$ROOM7/heimserver" "$LOG7" && grep -q "branch agora/$ROOM7/mac" "$LOG7"'
 check "the joiner worked in its own clone" 'grep -A2 "Heimserver · DONE" "$LOG7" | grep -q "cwd=repoB"'
+check "a report that says done comes with what git says about the branch" 'grep -q "Checked on Heimserver: there is no branch .agora/$ROOM7/heimserver. in its clone, so nothing was committed" "$LOG7" && grep -q "Checked on Mac: there is no branch .agora/$ROOM7/mac. in its clone" "$LOG7"'
 check "agora status shows each peer's capacity" 'a status | grep -q "Heimserver.*42 % of its limit used" && b status | grep -q "Mac.*42 % of its limit used"'
 
 # 8. A peer that reaches its usage limit hands its package to a peer with capacity.
 a stop >/dev/null; b stop >/dev/null; sleep 1
 a status >/dev/null
-export FAKE_LIMIT=1; b status >/dev/null; unset FAKE_LIMIT
-wait_for 40 'a status | grep -q "Heimserver *online"'
+export FAKE_LIMIT=1 FAKE_COMMIT=1; b status >/dev/null; unset FAKE_LIMIT FAKE_COMMIT
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2
 (cd "$T/repoA" && a discuss "Build it again" --with Heimserver --turns 3 > "$T/out8" 2>&1)
 ROOM8="$(ls -t "$T/a/rooms" | head -1)"
 LOG8="$T/a/rooms/$ROOM8/log.md"
 check "the peer at its limit reports it" 'grep -q "Heimserver · LIMIT" "$LOG8"'
 check "its package is handed over, branch included" 'grep -A1 "Mac · HANDOVER" "$LOG8" | grep -q "frontend goes from Heimserver to Mac.*Branch: agora/$ROOM8/heimserver"'
 check "the taker finishes both packages" '[ "$(grep -c "Mac · DONE" "$LOG8")" = 2 ] && grep -q "closed: work finished;" "$T/out8"'
+check "the peer at its limit says what it leaves behind: the last commit, not pushed, and what is not committed" 'grep -A2 "Heimserver · LIMIT" "$LOG8" | grep -q "Checked on Heimserver: .agora/$ROOM8/heimserver. is at [0-9a-f]* Half the work and not pushed: it exists on that machine only.*wip.txt"'
+check "the taker is told so with the package" 'grep -q "got-the-note" "$LOG8"'
 check "the peer is shown at its limit afterwards" 'a status | grep -q "Heimserver.*at its usage limit"'
 
 # 8b. A peer that had nothing to add before a proposal was made has not
@@ -173,6 +176,7 @@ wait_for 20 'b rooms | grep -q "waits for your go"'
 ROOM8E="$(b rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p' | head -1)"
 check "a package from that peer waits on the receiving machine" 'b rooms | grep -q "package #2 \"frontend\" on branch agora/$ROOM8E/heimserver waits for your go"'
 check "the other peer does its package meanwhile" 'wait_for 10 "grep -q \"Mac · DONE\" \"$T/a/rooms/$ROOM8E/log.md\""'
+check "the room is told that the package waits for a human there" 'wait_for 10 "grep -A1 \"Heimserver · HOLD\" \"$T/a/rooms/$ROOM8E/log.md\" | grep -q \"frontend.* waits for a human on Heimserver\""'
 b go "$ROOM8E" > "$T/out8e2" 2>&1
 wait
 check "the go on the receiving machine lets it build" 'grep -q "being built on this machine" "$T/out8e2" && grep -q "closed: work finished;" "$T/out8e" && grep -q "Heimserver · DONE" "$T/a/rooms/$ROOM8E/log.md"'
@@ -191,6 +195,17 @@ export FAKE_SPLIT=2; a status >/dev/null; b status >/dev/null; export FAKE_SPLIT
 (cd "$T/repoA" && a discuss "Build under a cap" --with Heimserver --turns 3 --work-tokens 1 > "$T/out8g" 2>&1)
 LOG8G="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
 check "with a token cap, a package that would start after it is used up is not started" 'grep -q "Not started: the work phase has used more than the 1 tokens" "$LOG8G" && [ "$(grep -c "Mac · DONE" "$LOG8G")" = 1 ] && grep -q "closed: work finished with open packages" "$T/out8g"'
+
+# 8h. A reply to a package that is no report is not a success. In a real run a
+# model wrote a tool call as text; that had counted as done.
+a stop >/dev/null; b stop >/dev/null; sleep 1
+export FAKE_NOREPORT=2; a status >/dev/null; export FAKE_NOREPORT=1; b status >/dev/null; unset FAKE_NOREPORT; both_online
+(cd "$T/repoA" && a discuss "Build, and say so" --with Heimserver --turns 3 > "$T/out8h" 2>&1)
+LOG8H="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "a session whose reply is no report is asked once more" 'grep -A2 "Heimserver · DONE" "$LOG8H" | grep -q "Did the work once I was asked again"'
+check "one that still does not report has its package blocked, with what it said" 'grep -A2 "Mac · BLOCKED" "$LOG8H" | grep -q "The session did not report on the package" && grep -q "Let me look at the files first" "$LOG8H" && ! grep -q "Mac · DONE" "$LOG8H"'
+check "the room closes with that package open" 'grep -q "closed: work finished with open packages" "$T/out8h"'
+restart
 
 # 9. A lean room discusses without tools and starts a second session for the
 # work. If that one cannot start, the package is blocked; the session without
@@ -224,9 +239,10 @@ check "its room still closes with a result" 'grep -q "closed: work finished with
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out8c out8c2 out8c4 out8d2 out8e out8f out8g out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out8c out8c2 out8c4 out8d2 out8e out8f out8g out8h out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
   [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }
+  [ -n "${LOG8H:-}" ] && { echo "--- room log 8h"; cat "$LOG8H"; }
 fi
 exit "$fail"

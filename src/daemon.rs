@@ -74,6 +74,9 @@ pub struct Shared {
     harnesses: Mutex<HashMap<String, proto::Harness>>,
     /// Rooms joined here in which a package waits for this machine's human.
     waiting: Mutex<HashMap<String, String>>,
+    /// The block list again, apart from the state, so that a message can be
+    /// screened on its way out wherever it is sent from.
+    blocklist: Mutex<Vec<String>>,
     /// Signs this machine's shared-memory entries.
     secret: SecretKey,
     /// Open connections by peer id, to report how a peer is reached.
@@ -142,9 +145,66 @@ impl Shared {
 
     /// Queues a message for an approved, connected peer. False if it is offline.
     pub fn send_to(&self, peer: &str, msg: Msg) -> bool {
+        let msg = self.screen(msg);
         match self.conns.lock().unwrap().get(peer) {
             Some(tx) => tx.send(msg).is_ok(),
             None => false,
+        }
+    }
+}
+
+/// What a peer receives in place of a text that contained a blocked term.
+const WITHHELD: &str = "[withheld: this text contained a term that the machine it comes from never sends]";
+
+impl Shared {
+    /// Replaces every text of an outgoing message that contains a term of this
+    /// machine's block list. The same list that guards the shared memory; here
+    /// it covers what sessions say and report, which nobody reads before it leaves.
+    fn screen(&self, mut msg: Msg) -> Msg {
+        let list = self.blocklist.lock().unwrap();
+        if list.is_empty() {
+            return msg;
+        }
+        let mut hit: Option<String> = None;
+        let mut check = |text: &mut String| {
+            if let Some(term) = memory::blocked(&list, text) {
+                hit = Some(term.to_string());
+                *text = WITHHELD.to_string();
+            }
+        };
+        match &mut msg {
+            Msg::RoomInvite { topic, catch_up, .. } => {
+                check(topic);
+                if let Some(c) = catch_up {
+                    check(c);
+                }
+            }
+            Msg::Say { text, .. } | Msg::Discuss { text, .. } => check(text),
+            Msg::Work { title, note, .. } => {
+                check(title);
+                if let Some(n) = note {
+                    check(n);
+                }
+            }
+            Msg::RoomClose { reason, result, .. } => {
+                check(reason);
+                check(result);
+            }
+            Msg::RoomDecline { reason, .. } => check(reason),
+            _ => {}
+        }
+        drop(list);
+        if let Some(term) = hit {
+            event("withheld", &format!("a message to a peer was withheld: it contained \"{term}\", which is on this machine's block list"));
+        }
+        msg
+    }
+
+    /// Fails if a text a human is about to send contains a blocked term.
+    fn sendable(&self, text: &str) -> Result<()> {
+        match memory::blocked(&self.blocklist.lock().unwrap(), text) {
+            Some(term) => bail!("not sent: the text contains \"{term}\", which is on this machine's block list (agora block list)"),
+            None => Ok(()),
         }
     }
 }
@@ -367,6 +427,7 @@ pub async fn run() -> Result<()> {
     let info = DaemonInfo { port: listener.local_addr()?.port(), token: token.clone(), pid: std::process::id() };
     write_private(&DaemonInfo::path(), &serde_json::to_string(&info)?)?;
 
+    let blocklist = state.blocklist.clone();
     let shared = Arc::new(Shared {
         me: endpoint.id().to_string(),
         endpoint: endpoint.clone(),
@@ -376,6 +437,7 @@ pub async fn run() -> Result<()> {
         capacity: Mutex::new(HashMap::new()),
         harnesses: Mutex::new(HashMap::new()),
         waiting: Mutex::new(HashMap::new()),
+        blocklist: Mutex::new(blocklist),
         activity: Mutex::new(HashMap::new()),
         secret,
         links: Mutex::new(HashMap::new()),
@@ -1114,12 +1176,14 @@ fn command(shared: &Arc<Shared>, req: &Request) -> Result<String> {
                         state.blocklist.push(term.clone());
                         state.save()?;
                     }
-                    Ok(format!("\"{term}\" will never be written to the shared memory from this machine."))
+                    *shared.blocklist.lock().unwrap() = state.blocklist.clone();
+                    Ok(format!("\"{term}\" will never be written to the shared memory or sent to a peer from this machine."))
                 }
                 "remove" => {
                     let term = arg("term")?;
                     state.blocklist.retain(|t| *t != term);
                     state.save()?;
+                    *shared.blocklist.lock().unwrap() = state.blocklist.clone();
                     Ok(format!("Removed \"{term}\" from the block list."))
                 }
                 other => bail!("unknown block action: {other}"),
@@ -1230,6 +1294,7 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
         "ask" | "delegate" => {
             let mode = if req.cmd == "delegate" { "task" } else { "ask" };
             let question = arg("question")?;
+            shared.sendable(&question)?;
             let peer = {
                 let state = shared.state.lock().unwrap();
                 let conns = shared.conns.lock().unwrap();
@@ -1276,7 +1341,9 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
                 let room = rooms.get(&id).ok_or_else(|| anyhow!("no running room {id}"))?;
                 (room.tx.clone(), room.state.clone())
             };
-            tx.try_send(RoomEvent::Human(arg("text")?, extra)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
+            let text = arg("text")?;
+            shared.sendable(&text)?;
+            tx.try_send(RoomEvent::Human(text, extra)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
             // If the room was waiting for this answer, return once it runs again,
             // so a following `agora wait` does not see the old question.
             if let Some(mut state) = state {
@@ -1347,6 +1414,7 @@ async fn wait_room(id: &str, mut rx: watch::Receiver<RoomState>) -> Result<Strin
 /// Opens a room and waits until it pauses or closes. Returns the text for the human.
 async fn discuss(shared: &Arc<Shared>, req: &Request) -> Result<String> {
     let topic = req.args.get("topic").cloned().ok_or_else(|| anyhow!("missing topic"))?;
+    shared.sendable(&topic)?;
     let turns: u32 = req.args.get("turns").map(|s| s.parse()).transpose().map_err(|_| anyhow!("turns must be a number"))?.unwrap_or(6);
     if !(1..=30).contains(&turns) {
         bail!("turns must be between 1 and 30");

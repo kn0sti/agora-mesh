@@ -115,6 +115,9 @@ pub enum Msg {
         /// How long the package may take; 0 from a peer that does not say.
         #[serde(default)]
         minutes: u32,
+        /// After a handover: the state the first owner's machine reported.
+        #[serde(default)]
+        note: Option<String>,
     },
     /// A new version of a shared-memory entry.
     #[serde(rename = "MEM_PUT")]
@@ -241,7 +244,8 @@ pub fn parse_kind(reply: &str, default: &str, allowed: &[&str]) -> (String, Stri
     let reply = reply.trim();
     let (first, rest) = reply.split_once('\n').unwrap_or((reply, ""));
     let (head, tail) = first.split_once(':').unwrap_or((first, ""));
-    let head = head.trim().trim_matches(|c| c == '*' || c == '#' || c == '`').trim().to_uppercase().replace(' ', "_");
+    // "**Done.**" is DONE: emphasis and a full stop are not part of the kind.
+    let head = head.trim().trim_matches(|c| c == '*' || c == '#' || c == '`' || c == '.' || c == '!').trim().to_uppercase().replace(' ', "_");
     if allowed.contains(&head.as_str()) {
         let text = format!("{}\n{}", tail.trim(), rest).trim().to_string();
         (head, text)
@@ -337,6 +341,14 @@ impl Ticket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emphasis_and_a_full_stop_are_not_part_of_the_kind() {
+        assert_eq!(parse_kind("**Done.**\nAll of it.", "", &["DONE", "BLOCKED"]), ("DONE".to_string(), "All of it.".to_string()));
+        assert_eq!(parse_kind("BLOCKED: no access", "", &["DONE", "BLOCKED"]), ("BLOCKED".to_string(), "no access".to_string()));
+        // A tool call written as text is no report.
+        assert_eq!(parse_kind("Bash<arg_key>command</arg_key>", "", &["DONE", "BLOCKED"]).0, "");
+    }
 
     #[test]
     fn ticket_roundtrip() {

@@ -230,15 +230,20 @@ Agents count differently in `usage`: OpenCode and Codex report the tokens of the
 **A go before the work.** Two switches put a human between the agreement and the work. Neither is on by default.
 
 - *On the opener's machine:* a room opened with `agora discuss --approve` pauses once a split is agreed. `agora discuss` returns the split, each package with its peer and branch, and the room publishes `HOLD`. `agora go <room>` starts the work phase. `agora say <room> "<text>"` is published as a human's message instead: every peer gets at least one more turn, the earlier answers no longer count, and the room waits again when the peers have agreed again. `agora cancel <room>` closes the room with what was agreed as its result and no work. Without any of these the room closes the same way after an hour.
-- *On a machine that receives a package:* with `agora trust <name> --work ask`, a `WORK` message from a room that peer opened is held. `agora rooms` shows the package, an event `work-waiting` is written, and `agora go <room>` on that machine lets its session build it. `agora cancel <room>` reports the package as blocked, "a human on <name> refused the package". The opener is not told that the package waits; it waits for the report as for any package, up to the time a package may take.
+- *On a machine that receives a package:* with `agora trust <name> --work ask`, a `WORK` message from a room that peer opened is held. `agora rooms` shows the package, an event `work-waiting` is written, and `agora go <room>` on that machine lets its session build it. `agora cancel <room>` reports the package as blocked, "a human on <name> refused the package". The machine tells the room (`HOLD`), so the log on every machine shows where the package waits. The opener waits for the report as for any package, up to the time a package may take.
 
 Nothing is changed on any machine before the go: the discussion session of a harness without a check of its own cannot change files (section 5), and the session that can is started by the work phase.
 
 **Limits.** `--work-minutes N` is the time one package may take, 60 by default; the opener sends it with `WORK`, and a session that runs longer is stopped and its package reported as blocked. `--work-tokens N` is a cap on the work phase: tokens are only known when a package reports, so the cap cannot stop a package that is running. It keeps further packages from starting, which matters when a peer has several packages or a package is handed over.
 
-**Work phase.** Every package gets the branch `agora/<room>/<peer>`. The opener's daemon sends `WORK` to each owner; all peers work at the same time, one package per peer at a time, each in its own clone. A session is told to commit on its branch, to push it if it may, to run the checks that exist for what it changed, and to report `DONE` or `BLOCKED` with what it did and which checks ran. When all packages are reported, the opener's session writes the result for the human. The daemon does not run git itself and does not merge; one branch per peer is what keeps peers apart.
+**Work phase.** Every package gets the branch `agora/<room>/<peer>`. The opener's daemon sends `WORK` to each owner; all peers work at the same time, one package per peer at a time, each in its own clone. A session is told to commit on its branch, to push it if it may, to run the checks that exist for what it changed, and to report `DONE` or `BLOCKED` with what it did and which checks ran. When all packages are reported, the opener's session writes the result for the human. The daemon does not merge and changes nothing in a clone; one branch per peer is what keeps peers apart.
 
-**Takeover.** When a peer reaches its usage limit, in the work phase or before a package starts, the package goes to the peer with capacity that has the least to do (`HANDOVER`), together with the branch name; the taker is told to fetch that branch and continue. If nobody has capacity left the package is reported as blocked. In the discussion a limited peer takes no further turns. If the opener's own session is limited, the overview is assembled from the log without a model.
+**Reports are checked.** A report is not taken on trust in two places.
+
+- A reply that starts with neither `DONE` nor `BLOCKED` is no report. The session is asked once more; if it still does not report, the package is `BLOCKED` with the start of what the session said. Before version 0.4.0 such a reply counted as done; in a real run a model wrote a tool call as text and nothing else, and the room closed with "work finished".
+- To a `DONE` the daemon of the reporting machine adds what git says there: `Checked on <peer>: <branch> is at <commit> and pushed`, or "not pushed: it exists on that machine only", or "there is no branch … so nothing was committed for this package", and how many changed files are not committed. It reads (`rev-parse`, `log`, `status`) and judges nothing: a package that needed no commit is still done. "Pushed" means what that clone knows about origin.
+
+**Takeover.** When a peer reaches its usage limit, in the work phase or before a package starts, the package goes to the peer with capacity that has the least to do (`HANDOVER`), together with the branch name; the taker is told to fetch that branch and continue. The `LIMIT` report carries what git says on the machine that stopped, and the taker gets it with the package (`note` of `WORK`): the branch's last commits, whether it is pushed, and the changed files that are not committed. A session cannot write this itself once its limit is reached, which is why the daemon does, and why every session is told to commit and push after each step that stands on its own. What was not pushed stays on that machine; the note says so and moves nothing. If nobody has capacity left the package is reported as blocked. In the discussion a limited peer takes no further turns. If the opener's own session is limited, the overview is assembled from the log without a model.
 
 The token budget of a room (`--tokens`) applies to the discussion; `--work-tokens` is the cap for the work phase.
 
@@ -284,7 +289,13 @@ The author shown for an entry is the name this machine knows that peer by, not w
 
 **Room results.** When a room opened here closes with a result, the result is saved as `Room <id>: <topic>` with importance normal (`agora discuss --remember high|normal|low|none`).
 
-**Block list.** `agora block add <term>` names text that must never leave this machine through the memory. `agora remember` and room results that contain a term are refused. Nothing else is checked against it: not what sessions say to each other in a room, and not what `agora ask`, `agora delegate` and `agora review` send to a peer, the diff of a review included.
+**Block list.** `agora block add <term>` names text that must never leave this machine. It is matched word for word, without regard to case.
+
+- *Memory:* `agora remember` and room results that contain a term are refused.
+- *What a human sends:* `agora ask`, `agora delegate`, `agora review` (the diff is part of the question), the topic of `agora discuss` and `agora say` are refused with the term named.
+- *What a session sends:* every message to a peer passes one place in the daemon. A text with a term is replaced there by a line that says it was withheld: a contribution, a report on a package, a result, the title of a package, what a late joiner is told. The kind of the message stays, so a room goes on. The machine writes an event `withheld`.
+
+Not covered: a paraphrase, what a session commits and pushes, and what the model's service sees of the session's own reading.
 
 **Obsidian.** `agora obsidian <vault folder>` connects the memory with an Obsidian vault in both directions.
 
@@ -313,7 +324,7 @@ Messages are authenticated by the QUIC connection: a link belongs to exactly one
 | `ROOM_JOIN`, `ROOM_DECLINE` | `room_id`, `reason` | answer; a decline during a room means the peer leaves |
 | `SAY` | `room_id`, `kind`, `text`, `tokens`, `extra_turns`, `package`, `n` | joiner to opener: a contribution, a human's message, or a report on a package |
 | `DISCUSS_MSG` | `room_id`, `seq`, `from`, `from_name`, `kind`, `text`, `turns_left`, `next` | opener to joiners: a numbered message and who speaks next |
-| `WORK` | `room_id`, `package`, `title`, `branch`, `taken_from`, `minutes` | work on this package now, for at most this long |
+| `WORK` | `room_id`, `package`, `title`, `branch`, `taken_from`, `minutes`, `note` | work on this package now, for at most this long; after a handover with what the first owner's machine reported |
 | `RESEND` | `room_id`, `from_seq` | send the room's messages again from this number |
 | `ROOM_PING` | `room_id` | do you still have this room? |
 | `ROOM_CLOSE` | `room_id`, `reason`, `result` | the room is closed |
@@ -359,7 +370,7 @@ Sessions that load a large `CLAUDE.md` and memory, or read files during a turn, 
 |---|---|
 | Resuming a room after the opener's daemon restarts | design in [docs/design/room-resume.md](docs/design/room-resume.md) |
 | Running the daemon as a system service | it starts on demand and with the plugin's hook; it does not start at boot |
-| A note for the taker of a package | on a handover the taker gets the package, the branch and who started it; nothing says what is done and what is half-finished, and work that was not pushed stays on the other machine |
+| Moving work that was not pushed | on a handover the taker is told which commits and files exist on the other machine only; nothing transfers them |
 | A review phase after the work phase | each peer reviewing the other's branch would have caught part of what the measured run got wrong |
 | A board per room and file reservations | a late joiner gets a summary of the log instead; one branch per peer keeps work apart |
 | Knowledge levels beyond invitations | no peer card, no mirroring of a peer's Claude memory or other sources |
