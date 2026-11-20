@@ -10,7 +10,7 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 
 *A room that ran on 2026-11-20, as it happened: nine messages, 422 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
-> **Status: early development, version 0.2.1.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
+> **Status: early development, version 0.3.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
 
@@ -22,6 +22,7 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 | let agents brief each other, discuss under a budget, and agree or ask you | make a small task cheaper: there one agent alone is faster and uses fewer tokens |
 | split work and do the parts at the same time, one branch per peer | review or merge the branches for you; the measured results needed a review |
 | hand a package to another peer when one reaches its usage limit | resume a room after the opener's daemon restarted |
+| wait for your go before anyone starts working, on the machine that opened the room and on the one a package lands on | give the taker of a package more than its branch: no note on what was done and what is half-finished |
 | ask one peer a question, hand it a task, have it review your changes | filter what you send to a peer: the block list guards the shared memory only |
 | keep one memory on all machines, also as notes in an Obsidian vault | start at boot: the daemon starts on demand and with the plugin |
 | run a peer on another model or on another agent | make every agent lean: an agent brings 11,000 to 18,000 tokens per turn of its own |
@@ -142,7 +143,7 @@ The block list guards the shared memory and nothing else. What goes to a peer di
 2. One machine opens a network; others join with the network ID. A human approves every join.
 3. Any peer opens a room for a topic. Each invited daemon starts a fresh session in its own clone of the project, on the agent and model that machine is set up for.
 4. The opener briefs the others; then all take equal turns under a budget until they agree, split the work, or ask a human. Whoever makes a proposal has agreed to it; the room is agreed when every other peer says so.
-5. If they agreed on a split, each peer does its package on its own branch, at the same time.
+5. If they agreed on a split, each peer does its package on its own branch, at the same time. With `--approve` the room first shows you the split and waits for your go.
 6. The result goes back to the session that asked, and into the shared memory.
 
 ## Security: read this first
@@ -155,8 +156,12 @@ Connect only machines and people you trust with a shell on your computer. Connec
 |---|---|
 | `agora trust <name> --rights read` | this peer's sessions here may only read |
 | `agora trust <name> --rights talk` | this peer's sessions here get no tools |
+| `agora trust <name> --work ask` | a work package from a room this peer opened waits for your `agora go` before it is built here |
+| `agora discuss … --approve` | a room you open waits for your go once the peers agreed on a split |
 | `agora revoke <name>` | remove a peer |
 | `agora panic` | stop every room and its session on this machine |
+
+**A go before the work.** By default a room that agreed on a split starts working at once, and a package that lands on your machine is built on arrival. Two switches put a human in between: `agora discuss --approve` on the machine that opens a room, and `agora trust <name> --work ask` on a machine that receives packages from that peer. Until the go nothing is changed anywhere.
 
 Claude Code on Anthropic's service checks what a session does in its `auto` permission mode. Nothing does that on another model or in another agent, so such a peer only reads while a room discusses and gets its tools when the work phase starts. See [other agents and other models](#other-agents-and-other-models) before you let one work.
 
@@ -213,6 +218,11 @@ While a room runs:
 | `agora invite <room> <peer>` | bring another peer into the running room |
 | `agora discuss … --model fable` | the model every Claude session of the room uses; default is each machine's own |
 | `agora discuss … --turns N --tokens N --lean` | turns per peer; token budget; discuss without tools |
+| `agora discuss … --approve` | wait for your go once the peers agreed on a split, before anyone starts working |
+| `agora go <room>` | start the work as agreed; on a machine a package waits on: build it |
+| `agora say <room> "<what to change>"` | instead of the go: send the split back to the peers |
+| `agora cancel <room>` | close the room without the work; on a machine a package waits on: refuse it |
+| `agora discuss … --work-minutes N --work-tokens N` | minutes one package may take (60); tokens of the work phase after which no further package starts |
 
 The shared memory and what happened:
 

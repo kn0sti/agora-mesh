@@ -127,6 +127,20 @@ Two rules of a room did not survive these models: that a session with tools wait
 
 Both rooms closed with "work finished" and a result for the human that names the two branches.
 
+### A go before the work
+
+Version 0.3.0 can put a human between the agreement and the work, on the machine that opens a room (`--approve`) and on a machine that receives a package (`agora trust <name> --work ask`). Run with both switches on, deepseek-v4.1-flash on both sides, same task:
+
+| Seconds | |
+|---|---|
+| 0 to 122 | brief, known and missing, answer, split, consensus; the room publishes HOLD and `agora discuss` returns the two packages with their peers and branches |
+| at the go | the origin holds `main` only |
+| after the opener's go | the opener's session builds its package; the package for the other machine waits there, and `agora rooms` on that machine shows it |
+| after the go on the other machine | that package is built |
+| 256 | both branches pushed, `main` untouched, the script works; 9 messages, 77,773 tokens |
+
+The first attempt found one more thing the scripted stand-ins could not: a session that discusses with reading rights only did not know that its package would be done by a second session. Asked to agree to a split, it reported itself as blocked ("my only tool is file reading") and asked for a human. Such a session is now told that this is on purpose and that the work is done in a second session with the tools for it.
+
 One more thing from run 3's first attempt: the reseller answered one model's requests with a sentence saying that the key may not use that model, sent as an ordinary answer and not as an error. Neither Claude Code nor agora-mesh can tell such a sentence from a contribution; it went into the room three times before the other model asked for a human.
 
 ## Not measured

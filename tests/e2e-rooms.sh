@@ -140,6 +140,58 @@ wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac 
 LOG8B="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
 check "a pass before a proposal is not an answer to it" 'grep -q "Heimserver · PASS" "$LOG8B" && grep -q "Heimserver · CONSENSUS" "$LOG8B" && grep -q "closed: work finished\|closed: consensus" "$T/out8b"'
 
+# 8c. A human's go before the work. With --approve the room waits once a split
+# is agreed: go, say what to change, or cancel.
+both_online() { wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'; sleep 2; }
+room_of() { sed -n 's/^\[room \([a-z0-9]*\) waits for your go.*/\1/p' "$1"; }
+a stop >/dev/null; b stop >/dev/null; sleep 1
+a status >/dev/null; b status >/dev/null; both_online
+(cd "$T/repoA" && a discuss "Build with a go" --with Heimserver --turns 3 --approve > "$T/out8c" 2>&1)
+ROOM8C="$(room_of "$T/out8c")"
+LOG8C="$T/a/rooms/$ROOM8C/log.md"
+check "with --approve an agreed split waits for a go and shows who does what" '[ -n "$ROOM8C" ] && grep -q "#1 Mac: backend (branch agora/$ROOM8C/mac)" "$T/out8c" && grep -q "#2 Heimserver: frontend (branch agora/$ROOM8C/heimserver)" "$T/out8c"'
+check "nobody works before the go" '! grep -q "· WORK\]" "$LOG8C" && a rooms | grep -q "the agreed split waits for your go"'
+a say "$ROOM8C" "Please keep the names short" --turns 1 >/dev/null
+a wait "$ROOM8C" > "$T/out8c2" 2>&1
+check "what a human says instead goes back to the peers, and the room waits again" 'grep -q "waits for your go" "$T/out8c2" && grep -q "· HUMAN\]" "$LOG8C" && [ "$(grep -c "· HOLD\]" "$LOG8C")" = 2 ] && ! grep -q "· WORK\]" "$LOG8C"'
+a go "$ROOM8C" > "$T/out8c3" 2>&1
+a wait "$ROOM8C" > "$T/out8c4" 2>&1
+check "the go starts the work" 'grep -q "The work starts" "$T/out8c3" && grep -q "closed: work finished;" "$T/out8c4" && grep -q "Heimserver · DONE" "$LOG8C"'
+check "a room that is not waiting takes no go" '! a go "$ROOM8C" >/dev/null 2>&1'
+
+(cd "$T/repoA" && a discuss "Build, or not" --with Heimserver --turns 3 --approve > "$T/out8d" 2>&1)
+ROOM8D="$(room_of "$T/out8d")"
+a cancel "$ROOM8D" >/dev/null 2>&1
+a wait "$ROOM8D" > "$T/out8d2" 2>&1
+check "cancel closes the room without the work and keeps what was agreed" 'grep -q "closed: a human stopped the room before the work" "$T/out8d2" && grep -q "PLAN: the agreed split" "$T/out8d2" && ! grep -q "· WORK\]" "$T/a/rooms/$ROOM8D/log.md"'
+
+# The same on the receiving side: a package that lands here waits for this machine's human.
+b trust Mac --work ask > "$T/out8e0" 2>&1
+check "a peer can be set so that its packages wait here" 'grep -q "waits for .agora go. here" "$T/out8e0"'
+(cd "$T/repoA" && a discuss "Build, if they let us" --with Heimserver --turns 3 > "$T/out8e" 2>&1) &
+wait_for 20 'b rooms | grep -q "waits for your go"'
+ROOM8E="$(b rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p' | head -1)"
+check "a package from that peer waits on the receiving machine" 'b rooms | grep -q "package #2 \"frontend\" on branch agora/$ROOM8E/heimserver waits for your go"'
+check "the other peer does its package meanwhile" 'wait_for 10 "grep -q \"Mac · DONE\" \"$T/a/rooms/$ROOM8E/log.md\""'
+b go "$ROOM8E" > "$T/out8e2" 2>&1
+wait
+check "the go on the receiving machine lets it build" 'grep -q "being built on this machine" "$T/out8e2" && grep -q "closed: work finished;" "$T/out8e" && grep -q "Heimserver · DONE" "$T/a/rooms/$ROOM8E/log.md"'
+(cd "$T/repoA" && a discuss "Build, and they say no" --with Heimserver --turns 3 > "$T/out8f" 2>&1) &
+wait_for 20 'b rooms | grep -q "waits for your go"'
+ROOM8F="$(b rooms | sed -n 's/^room \([a-z0-9]*\) .*/\1/p' | head -1)"
+b cancel "$ROOM8F" >/dev/null 2>&1
+wait
+check "a package the receiving human refuses is reported as blocked" 'grep -A2 "Heimserver · BLOCKED" "$T/a/rooms/$ROOM8F/log.md" | grep -q "a human on Heimserver refused the package" && grep -q "closed: work finished with open packages" "$T/out8f"'
+b trust Mac --work auto >/dev/null
+
+# Limits of the work phase.
+check "a package has to be allowed at least a minute" '! a discuss "X" --with Heimserver --project none --work-minutes 0 >/dev/null 2>&1'
+a stop >/dev/null; b stop >/dev/null; sleep 1
+export FAKE_SPLIT=2; a status >/dev/null; b status >/dev/null; export FAKE_SPLIT=1; both_online
+(cd "$T/repoA" && a discuss "Build under a cap" --with Heimserver --turns 3 --work-tokens 1 > "$T/out8g" 2>&1)
+LOG8G="$T/a/rooms/$(ls -t "$T/a/rooms" | head -1)/log.md"
+check "with a token cap, a package that would start after it is used up is not started" 'grep -q "Not started: the work phase has used more than the 1 tokens" "$LOG8G" && [ "$(grep -c "Mac · DONE" "$LOG8G")" = 1 ] && grep -q "closed: work finished with open packages" "$T/out8g"'
+
 # 9. A lean room discusses without tools and starts a second session for the
 # work. If that one cannot start, the package is blocked; the session without
 # tools does not do the work instead, and the room goes on for the others.
@@ -172,7 +224,7 @@ check "its room still closes with a result" 'grep -q "closed: work finished with
 if [ "$fail" = 0 ]; then
   echo "ALL PASSED"
 else
-  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
+  for f in out1 out2 out2b out3 out4 out4b out5 out6 out6b out7 out8 out8b out8c out8c2 out8c4 out8d2 out8e out8f out8g out9 out10; do echo "--- $f"; cat "$T/$f" 2>/dev/null; done
   echo "--- daemon log a"; tail -15 "$T/a/daemon.log"
   echo "--- daemon log b"; tail -15 "$T/b/daemon.log"
   [ -n "${LOG8:-}" ] && { echo "--- room log 8"; cat "$LOG8"; }

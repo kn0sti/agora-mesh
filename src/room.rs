@@ -34,7 +34,32 @@ pub enum RoomEvent {
     Invite(Member),
     /// The link to this peer came up (again).
     LinkUp(String),
+    /// A human lets the work start: the agreed split in a room opened here,
+    /// or the package that waits on this machine in a room joined here.
+    Go,
+    /// A human ends a room that waits for them, or refuses the package that waits here.
+    Cancel,
     Panic,
+}
+
+/// What the human who opens a room chooses for its work phase.
+#[derive(Clone, Copy)]
+pub struct WorkOptions {
+    /// Wait for a human's go once a split is agreed.
+    pub approve: bool,
+    /// How long one package may take.
+    pub minutes: u32,
+    /// Tokens of the work phase after which no further package is started; 0 for no cap.
+    pub tokens: u64,
+}
+
+/// How a wait for a human's go ended.
+enum Approval {
+    Go,
+    /// A human said something instead: the discussion goes on.
+    Change,
+    Cancel,
+    Timeout,
 }
 
 /// What `agora discuss` and `agora wait` wait for.
@@ -43,6 +68,8 @@ pub enum RoomState {
     Running,
     /// A peer sent NEED_HUMAN; holds the question.
     Paused(String),
+    /// The peers agreed on a split and wait for a human's go; holds the split.
+    Approval(String),
     Closed(Result<String, String>),
 }
 
@@ -126,7 +153,7 @@ fn discuss_msg(room_id: &str, e: &Entry) -> Msg {
 }
 
 fn render(e: &Entry) -> String {
-    if matches!(e.kind.as_str(), "HUMAN" | "BRIEF" | "KNOWN_MISSING" | "WORK" | "DONE" | "BLOCKED" | "HANDOVER" | "LIMIT" | "LEFT" | "JOIN" | "TURN") {
+    if matches!(e.kind.as_str(), "HUMAN" | "BRIEF" | "KNOWN_MISSING" | "WORK" | "DONE" | "BLOCKED" | "HANDOVER" | "LIMIT" | "LEFT" | "JOIN" | "TURN" | "HOLD") {
         format!("[#{} {} · {}]\n{}\n", e.seq, e.from_name, e.kind, e.text)
     } else {
         format!("[#{} {} · {} · {} left]\n{}\n", e.seq, e.from_name, e.kind, e.turns_left, e.text)
@@ -242,6 +269,7 @@ struct Opener {
     lean: bool,
     /// The discussion session of this machine cannot change files; a second session does its packages.
     two_sessions: bool,
+    work: WorkOptions,
     model: Option<String>,
     /// The harness profile this machine's sessions of the room run on; its default if none.
     harness: Option<String>,
@@ -286,6 +314,7 @@ pub async fn run_opener(
     lean: bool,
     model: Option<String>,
     harness: Option<String>,
+    work: WorkOptions,
     project: Option<(String, PathBuf)>,
     rx: mpsc::Receiver<RoomEvent>,
     state: watch::Sender<RoomState>,
@@ -320,9 +349,9 @@ pub async fn run_opener(
     // session with tools for the work phase.
     let split = lean || crate::harness::reads_while_discussing(harness.as_deref());
     let discuss_rights = if lean {
-        "talk"
+        "lean"
     } else if split {
-        "read"
+        "discuss"
     } else {
         "full"
     };
@@ -362,6 +391,7 @@ pub async fn run_opener(
         two_sessions: split,
         model,
         harness,
+        work,
         work_session: None,
         work_dir,
         others,
@@ -512,6 +542,19 @@ and where relevant information can be found. This one message needs no kind on t
             if kind == "NEED_HUMAN" && self.wait_human(&speaker, &text, &order).await? {
                 continue;
             }
+            // An agreed split waits for a human's go, if the room was opened that way.
+            if done == Some("consensus") && self.work.approve && self.split.is_some() {
+                match self.wait_approval(&speaker, &order).await? {
+                    Approval::Go => {}
+                    Approval::Change => {
+                        // What was agreed is open again: every peer answers the human.
+                        last_kind.clear();
+                        continue;
+                    }
+                    Approval::Cancel => break "a human stopped the room before the work",
+                    Approval::Timeout => break "nobody gave the go for the work",
+                }
+            }
             if let Some(reason) = done {
                 break reason;
             }
@@ -524,8 +567,12 @@ and where relevant information can be found. This one message needs no kind on t
                 reason = self.work_phase(split).await?;
             }
         }
+        // Stopped before the work: what the peers agreed on is still the result.
+        let held = reason.starts_with("a human stopped") || reason.starts_with("nobody gave the go");
         let ask = if reason.starts_with("work") {
             "The work phase is over. Write the result for the human who asked: per package what was done and on which branch, what is blocked or left, and how to review and merge it. No kind on the first line."
+        } else if held {
+            "The room agreed on a split of the work, and the work was not started. Write the agreed plan for the human who asked: the packages, who would do which, and what was agreed about them. No kind on the first line."
         } else if reason == "consensus" {
             "The room reached consensus. Write the agreed result for the human who asked: complete and usable on its own. No kind on the first line."
         } else {
@@ -597,7 +644,8 @@ and where relevant information can be found. This one message needs no kind on t
         let list = pkgs.iter().map(|p| format!("#{} {}: {} (branch {})", p.id, self.participant(&p.owner).name, p.title, p.branch)).collect::<Vec<_>>().join("\n");
         let me = self.me.clone();
         self.publish(&me, "WORK", &format!("Work phase. Packages:\n{list}"), None);
-        self.session.timeout = WORK_TIMEOUT;
+        self.session.timeout = self.work_timeout();
+        let before = self.total_tokens();
         loop {
             for i in 0..pkgs.len() {
                 if pkgs[i].state == PkgState::Open && self.at_limit(&pkgs[i].owner) {
@@ -619,12 +667,21 @@ and where relevant information can be found. This one message needs no kind on t
                 if pkgs[i].state != PkgState::Open || pkgs.iter().any(|p| p.owner == owner && p.state == PkgState::Running) {
                     continue;
                 }
+                // Tokens are known when a package reports, so the cap can only
+                // keep further packages from starting.
+                if self.work.tokens > 0 && self.total_tokens().saturating_sub(before) > self.work.tokens {
+                    pkgs[i].state = PkgState::Blocked;
+                    let who = self.participant(&owner);
+                    let text = format!("#{} {}\nNot started: the work phase has used more than the {} tokens it was given.", pkgs[i].id, pkgs[i].title, self.work.tokens);
+                    self.publish(&who, "BLOCKED", &text, None);
+                    continue;
+                }
                 pkgs[i].state = PkgState::Running;
                 if owner == self.me.id {
                     mine = Some(i);
                 } else {
                     let p = &pkgs[i];
-                    let work = Msg::Work { room_id: self.room_id.clone(), package: p.id, title: p.title.clone(), branch: p.branch.clone(), taken_from: p.taken_from.clone() };
+                    let work = Msg::Work { room_id: self.room_id.clone(), package: p.id, title: p.title.clone(), branch: p.branch.clone(), taken_from: p.taken_from.clone(), minutes: self.work.minutes };
                     self.assigned.insert(owner.clone(), work.clone());
                     self.shared.send_to(&owner, work);
                 }
@@ -697,8 +754,9 @@ and where relevant information can be found. This one message needs no kind on t
             let started = Session::start(self.harness.as_deref(), &self.work_dir, &self.me.name, &self.others, "full", self.model.as_deref(), self.cancel.clone());
             self.work_session = Some(started.map_err(|e| anyhow!("could not start a session with tools for the work: {e}"))?);
         }
+        let limit = self.work_timeout();
         let ws = self.work_session.as_mut().unwrap();
-        ws.timeout = WORK_TIMEOUT;
+        ws.timeout = limit;
         let reply = ws.turn(&format!("You take part in a room with {}. The room agreed on this plan:\n{}\n\n{prompt}", self.others, self.plan)).await;
         if let Some(c) = ws.capacity {
             self.shared.report_capacity(c);
@@ -743,7 +801,8 @@ and where relevant information can be found. This one message needs no kind on t
         let gone = self.limited.len();
         loop {
             // Longer than a peer's own limit for a package, so that its report arrives first.
-            let ev = match self.next_event(WORK_TIMEOUT + Duration::from_secs(300)).await {
+            let limit = self.work_timeout() + Duration::from_secs(300);
+            let ev = match self.next_event(limit).await {
                 Ok(ev) => ev,
                 Err(_) => {
                     // Whoever still owes a report drops out; its package goes to someone else.
@@ -820,6 +879,11 @@ and where relevant information can be found. This one message needs no kind on t
                         None => continue,
                     }
                 }
+                // `agora cancel`: no answer will come.
+                Some(RoomEvent::Cancel) => {
+                    let _ = self.state.send(RoomState::Running);
+                    return Ok(false);
+                }
                 Some(other) => {
                     self.side_event(other)?;
                     continue;
@@ -831,6 +895,68 @@ and where relevant information can be found. This one message needs no kind on t
             self.publish(&who, "HUMAN", &text, next);
             let _ = self.state.send(RoomState::Running);
             return Ok(true);
+        }
+    }
+
+    fn work_timeout(&self) -> Duration {
+        Duration::from_secs(self.work.minutes as u64 * 60)
+    }
+
+    /// The agreed split as the human sees it before the go: who does what, on which branch.
+    fn split_overview(&self) -> String {
+        let Some(split) = &self.split else { return String::new() };
+        split
+            .iter()
+            .enumerate()
+            .map(|(i, (owner, title))| {
+                let name = self.participant(owner).name;
+                format!("#{} {}: {} (branch agora/{}/{})", i + 1, name, title, self.room_id, name.to_lowercase())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Waits for a human's go after the peers agreed on a split. A human who
+    /// says something instead sends the split back to the peers.
+    async fn wait_approval(&mut self, last: &Participant, order: &[Participant]) -> Result<Approval> {
+        let me = self.me.clone();
+        self.publish(&me, "HOLD", "The agreed split waits for a human's go.", None);
+        let _ = self.state.send(RoomState::Approval(self.split_overview()));
+        crate::daemon::event("room-paused", &format!("{}: the agreed split waits for a go (agora go {})", self.room_id, self.room_id));
+        loop {
+            let ev = match self.next_event(PAUSE_TIMEOUT).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    let _ = self.state.send(RoomState::Running);
+                    return Ok(Approval::Timeout);
+                }
+            };
+            let (who, text, extra) = match ev {
+                Some(RoomEvent::Go) => {
+                    let _ = self.state.send(RoomState::Running);
+                    return Ok(Approval::Go);
+                }
+                Some(RoomEvent::Cancel) => {
+                    let _ = self.state.send(RoomState::Running);
+                    return Ok(Approval::Cancel);
+                }
+                Some(RoomEvent::Human(text, extra)) => (me.clone(), text, extra),
+                Some(RoomEvent::Remote(p, Msg::Say { kind, text, extra_turns, .. })) if kind == "HUMAN" => match self.joiners.iter().find(|j| j.id == p).cloned() {
+                    Some(j) => (j, text, extra_turns),
+                    None => continue,
+                },
+                Some(other) => {
+                    self.side_event(other)?;
+                    continue;
+                }
+                None => bail!("room stopped"),
+            };
+            // Every peer gets at least one turn to answer the human.
+            self.grant(extra.max(1));
+            let next = self.speaker_after(order, Some(&last.id)).map(|p| p.id);
+            self.publish(&who, "HUMAN", &text, next);
+            let _ = self.state.send(RoomState::Running);
+            return Ok(Approval::Change);
         }
     }
 
@@ -1146,9 +1272,9 @@ pub async fn run_joiner(shared: Arc<Shared>, invite: Invite, mut rx: mpsc::Recei
     // discussion and keeps the rights it was given.
     let split = invite.lean || (invite.mode.is_empty() && invite.rights == "full" && crate::harness::reads_while_discussing(None));
     let discuss_rights = if invite.lean {
-        "talk"
+        "lean"
     } else if split {
-        "read"
+        "discuss"
     } else {
         invite.rights.as_str()
     };
@@ -1217,15 +1343,23 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
     let mut catch_up = invite.catch_up.clone();
     let mut plan = String::new();
     let mut work_session: Option<Session> = None;
+    // A package that waits for this machine's human, the packages they let
+    // through, and events to look at again.
+    let mut held: Option<(u32, RoomEvent)> = None;
+    let mut approved: HashSet<u32> = HashSet::new();
+    let mut requeue: VecDeque<RoomEvent> = VecDeque::new();
     let room = invite.room_id.clone();
     let say = |said: &mut u32, kind: String, text: String, tokens: u64, extra_turns: u32, package: Option<u32>| {
         *said += 1;
         Msg::Say { room_id: room.clone(), kind, text, tokens, extra_turns, package, n: *said }
     };
     let outcome: Result<String> = loop {
-        let ev = match tokio::time::timeout(JOINER_IDLE, rx.recv()).await {
-            Ok(ev) => ev,
-            Err(_) => break Ok("the opener did not come back".into()),
+        let ev = match requeue.pop_front() {
+            Some(ev) => Some(ev),
+            None => match tokio::time::timeout(JOINER_IDLE, rx.recv()).await {
+                Ok(ev) => ev,
+                Err(_) => break Ok("the opener did not come back".into()),
+            },
         };
         let used = |session: &Session, work: &Option<Session>| session.tokens() + work.as_ref().map_or(0, |s| s.tokens());
         match ev {
@@ -1286,10 +1420,19 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 pending = Some(m.clone());
                 shared.send_to(&invite.from, m);
             }
-            Some(RoomEvent::Remote(p, Msg::Work { package, title, branch, taken_from, .. })) if p == invite.from => {
+            Some(RoomEvent::Remote(p, Msg::Work { package, title, branch, taken_from, minutes, .. })) if p == invite.from => {
                 // Asked again for a package we already reported on: repeat the report.
                 if let Some(m) = reports.get(&package) {
                     shared.send_to(&invite.from, m.clone());
+                    continue;
+                }
+                // The human of this machine wants to see a package before it is built here.
+                if !approved.contains(&package) && shared.asks_before_work(&invite.from) {
+                    let note = format!("package #{package} \"{title}\" on branch {branch}");
+                    shared.set_waiting(&invite.room_id, Some(note.clone()));
+                    crate::daemon::event("work-waiting", &format!("{}: {note} waits for a go on this machine (agora go {})", invite.room_id, invite.room_id));
+                    append(&dir, "log.md", &format!("Waiting for a human on this machine: {note}\n"));
+                    held = Some((package, RoomEvent::Remote(p, Msg::Work { room_id: invite.room_id.clone(), package, title, branch, taken_from, minutes })));
                     continue;
                 }
                 let task = work_prompt(package, &title, &branch, taken_from.as_deref(), has_clone);
@@ -1317,7 +1460,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 };
                 news.clear();
                 let worker = work_session.as_mut().unwrap_or(&mut session);
-                worker.timeout = WORK_TIMEOUT;
+                worker.timeout = if minutes > 0 { Duration::from_secs(minutes as u64 * 60) } else { WORK_TIMEOUT };
                 let turn = worker.turn(&prompt).await;
                 if let Some(c) = worker.capacity {
                     shared.report_capacity(c);
@@ -1340,6 +1483,24 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
                 let m = say(&mut said, "HUMAN".to_string(), text, used(&session, &work_session), extra_turns, None);
                 shared.send_to(&invite.from, m);
             }
+            // `agora go`: the package that waits here may be built.
+            Some(RoomEvent::Go) => {
+                if let Some((package, ev)) = held.take() {
+                    approved.insert(package);
+                    shared.set_waiting(&invite.room_id, None);
+                    requeue.push_back(ev);
+                }
+            }
+            // `agora cancel`: it may not; the room is told, and the package can go to another peer.
+            Some(RoomEvent::Cancel) => {
+                if let Some((package, _)) = held.take() {
+                    shared.set_waiting(&invite.room_id, None);
+                    let m = say(&mut said, "BLOCKED".to_string(), format!("a human on {my_name} refused the package"), used(&session, &work_session), 0, Some(package));
+                    reports.insert(package, m.clone());
+                    pending = Some(m.clone());
+                    shared.send_to(&invite.from, m);
+                }
+            }
             Some(RoomEvent::Panic) | None => {
                 shared.send_to(&invite.from, Msg::RoomDecline { room_id: invite.room_id.clone(), reason: "stopped on the peer's machine".into() });
                 break Ok("stopped".into());
@@ -1347,6 +1508,7 @@ This answer needs no kind on the first line.{project_note}\n\nQuestion: {}",
             _ => {}
         }
     };
+    shared.set_waiting(&invite.room_id, None);
     let reason = match &outcome {
         Ok(r) => r.clone(),
         Err(e) => format!("error: {e}"),
