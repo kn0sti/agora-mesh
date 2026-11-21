@@ -1,6 +1,6 @@
 {
   "name": "agora-mesh",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Work with Claude Code agents on your other machines: ask, delegate, review, discuss, shared memory.",
   "author": {
     "name": "kn0sti"
