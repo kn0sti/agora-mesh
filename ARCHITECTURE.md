@@ -265,6 +265,10 @@ They use the invitation of a room with `mode` set to `ask` or `task`, so the sam
 
 `agora peers` lists everyone: reachable directly or through a relay, how many rooms each is working on (`BUSY`), and how much of its usage limit is used. A peer's limit is known once a session has run there.
 
+### `agora demo`
+
+`src/demo.rs` runs a whole room on one machine for someone who has neither a second machine nor an account. It creates a temporary directory with two data directories, a bare git repository and a clone for each peer, then drives the normal commands (`setup`, `open`, `join`, `approve`, `discuss`). Daemons, link, room, work phase and git are the real code. The sessions are the binary itself: the daemons start it in place of `claude` with `AGORA_DEMO_AGENT` set, and it answers the stream-json protocol from a script and reports zero tokens. Git runs with its own configuration, so the user's signing and hooks do not apply. At the end, and on Ctrl-C, both daemons stop and the directory is removed; `--keep` leaves it. Like every link, the demo's needs the internet to find the other daemon through iroh's public servers.
+
 ## 8. Shared memory and events
 
 Every network has one shared memory, replicated to all its peers, under `shared/<network>/`:

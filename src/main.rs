@@ -1,6 +1,7 @@
 //! `agora` — command and daemon of agora-mesh. See ARCHITECTURE.md.
 
 mod daemon;
+mod demo;
 mod harness;
 mod memory;
 mod project;
@@ -41,6 +42,15 @@ enum Cmd {
         /// Name other peers see, for example "MacBook"
         #[arg(long)]
         name: String,
+    },
+    /// See a whole room on this machine: no account, no tokens, nothing left behind
+    Demo {
+        /// Do not pause between the steps
+        #[arg(long)]
+        fast: bool,
+        /// Keep the temporary folder to look at it afterwards
+        #[arg(long)]
+        keep: bool,
     },
     /// Run the daemon in the foreground
     Daemon,
@@ -306,8 +316,13 @@ fn cwd() -> String {
 }
 
 fn main() -> Result<()> {
+    // `agora demo` starts this binary in place of `claude`.
+    if demo::is_agent() {
+        return demo::agent();
+    }
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Demo { fast, keep } => demo::run(fast, keep),
         Cmd::Setup { name } => setup(&name),
         Cmd::Daemon => tokio::runtime::Runtime::new()?.block_on(daemon::run()),
         Cmd::Stop => stop(),
@@ -447,6 +462,7 @@ fn connect_or_start() -> Result<(TcpStream, DaemonInfo)> {
     }
     let _ = std::fs::remove_file(DaemonInfo::path());
     let log = std::fs::OpenOptions::new().create(true).append(true).open(state::home().join("daemon.log"))?;
+    keep_std_handles_from_children();
     std::process::Command::new(std::env::current_exe()?)
         .arg("daemon")
         .stdin(std::process::Stdio::null())
@@ -462,6 +478,27 @@ fn connect_or_start() -> Result<(TcpStream, DaemonInfo)> {
     }
     bail!("the daemon did not start; see {}", state::home().join("daemon.log").display())
 }
+
+/// On Windows a child inherits every inheritable handle, so the daemon would
+/// keep this command's stdout open: `agora status | findstr x` would never end,
+/// because the pipe stays open as long as the daemon runs.
+#[cfg(windows)]
+fn keep_std_handles_from_children() {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    for handle in [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()] {
+        if !handle.is_null() {
+            // A handle that cannot be changed (a console, for example) holds no pipe open.
+            let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_std_handles_from_children() {}
 
 fn call(cmd: &str, args: &[(&str, String)]) -> Result<()> {
     let (mut stream, info) = connect_or_start()?;

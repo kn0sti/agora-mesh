@@ -10,9 +10,30 @@ No machine is the master. Every machine keeps its own login. It needs no VPN and
 
 *A room that ran on 2026-11-20, as it happened: three different agents, thirteen messages, 325 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
 
-> **Status: early development, version 0.5.1.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
+> **Status: early development, version 0.6.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
 
 *agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
+
+## Try it in one minute
+
+You need one machine, git and an internet connection. No account, no API key, no Claude Code.
+
+```
+# macOS on Apple Silicon
+curl -fLo agora https://github.com/kn0sti/agora-mesh/releases/latest/download/agora-aarch64-apple-darwin
+
+# Linux on x64
+curl -fLo agora https://github.com/kn0sti/agora-mesh/releases/latest/download/agora-x86_64-unknown-linux-musl
+
+chmod +x agora
+./agora demo
+```
+
+Other platforms are on the [releases page](https://github.com/kn0sti/agora-mesh/releases/latest).
+
+![Terminal recording of agora demo: two machines connect after an approval, brief each other, one criticises the proposed split, they agree, each pushes its own branch, and the two branches merge without a conflict.](docs/img/demo.gif)
+
+The demo starts two real daemons that connect, open a real room and push real git branches. **The agents are scripted**, so it shows how a room runs and not how good a model's plan is. It uses no tokens, works in a temporary folder and removes it afterwards.
 
 ## What it can do, and what it cannot
 

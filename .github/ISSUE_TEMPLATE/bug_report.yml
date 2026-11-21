@@ -1,0 +1,50 @@
+name: Bug report
+description: Something does not work as the README says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Logs can hold project names, paths and what your agents said. Read them before you paste them, and remove anything private.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `agora --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS on Apple Silicon, macOS on Intel, Linux x64, Linux ARM64, Windows, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it happen?
+      options: [agora demo, Installing, Connecting two machines, A room, The work phase, Shared memory, Another agent or model, Something else]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Commands you ran
+      render: shell
+  - type: textarea
+    id: network
+    attributes:
+      label: Network and accounts
+      description: Same network or two different ones? Same login on both machines? Useful, because these cases are the least tested.
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant lines of ~/.agora/daemon.log
+      render: text
