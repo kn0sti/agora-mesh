@@ -6,9 +6,9 @@ You have a laptop and a desktop, each with a coding agent. Today you copy contex
 
 ![Two machines, a laptop running Claude Code and a desktop running Codex, each with its own login and its own git clone. They plan and critique over an encrypted link. Each builds its part on its own branch in your git repository, and you review and merge.](docs/img/overview.png)
 
-- **Works with the agents you already use.** Built for Claude Code. Codex and OpenCode have worked in real rooms too.
+- **Works with the agents you already use.** Built for Claude Code. Codex, OpenCode and Hermes Agent have joined real rooms too.
 - **Every machine keeps its own login and files.** agora-mesh never sees a login or a key.
-- **Nothing to host.** No VPN, no server of your own, no MCP. Machines connect directly and encrypted. Public [iroh](https://www.iroh.computer) relays help them find each other, and carry the traffic if no direct path exists.
+- **Nothing to host.** No VPN, no server of your own, no MCP. Machines connect directly with end-to-end encryption. Public [iroh](https://www.iroh.computer) relays help them find each other, and carry the traffic if no direct path exists.
 
 > **Early development, version 0.6.0.** An independent community project, not affiliated with Anthropic. [What has and has not been tested](#what-has-been-tested).
 
@@ -29,7 +29,7 @@ chmod +x agora
 
 Other platforms are on the [releases page](https://github.com/kn0sti/agora-mesh/releases/latest).
 
-![Terminal recording of agora demo: two machines connect after an approval, brief each other, one criticises the proposed split, they agree, each pushes its own branch, and the two branches merge without a conflict.](docs/img/demo.gif)
+![Terminal recording of agora demo: two local peers connect after an approval, brief each other, one criticises the proposed split, they agree, each pushes its own branch, and the two branches merge without a conflict.](docs/img/demo.gif)
 
 The connection, the room and the git branches are real, **but the agents are scripted**, so it shows the process and not the quality of a model. It uses no tokens and cleans up after itself.
 
@@ -77,7 +77,23 @@ With `--approve` the room shows you the agreed split and waits. `agora go <room>
 - **You want a second opinion.** Put two strong models on one plan, or a different agent next to yours, and let them argue before anything is built.
 - **You want one memory everywhere.** Notes an agent saves appear on all your machines as Markdown, and [can sync with Obsidian](docs/shared-memory.md).
 
-**When it does not help:** small tasks. A room costs more tokens and time than one agent. In one measured design question, a room of three used 712k tokens in 104 s, one agent alone 179k tokens in 34 s.
+**When it does not help:** small tasks. There, one agent is faster and much cheaper.
+
+## What it costs
+
+A room does not save tokens. Every agent re-reads the conversation on every turn. On one small planning question, a room of two used about **9 times** the tokens of one agent, and a room of three about **13 times**.
+
+![What one action costs, in median tokens: agora ask 1.8k, agora review 4.4k, one agent alone 4.5k, a room of two 41.6k, a room of three 60.5k.](docs/img/token-costs.png)
+
+| Action | Tokens (median) | Time (median) |
+|---|---|---|
+| `agora ask` | 1.8k | 8 s |
+| `agora review`, a small diff | 4.4k | 10 s |
+| One agent alone | 4.5k | 68 s |
+| Room of 2 | 41.6k | 182 s |
+| Room of 3 | 60.5k | 272 s |
+
+So use `ask` and `review` for small things, and a room when the task is large enough to split or a second opinion is worth the price. These are repeated real runs on one cheap model, the rooms and the single agent without tools. Claude Code with its built-in tools starts each turn much higher, and the runs compare cost, not the quality of the plans. [The full measurement, with an animation of a room spending tokens](docs/measurements/2026-11-token-costs.md).
 
 ## What happens in a room
 
@@ -103,7 +119,7 @@ agora-mesh does not replace that. It connects existing agents across machines so
 | **Memory and skills that grow** | a shared notebook, no learning | its main strength |
 | **Chat apps, scheduled jobs** | no | yes |
 
-Hermes can speak the [Agent Client Protocol](https://agentclientprotocol.com), which agora-mesh uses for other agents, so it may work as a peer. **We have not tested that yet.** Facts about Hermes are from its documentation on 2026-11-21.
+**You can also use both.** Hermes speaks the [Agent Client Protocol](https://agentclientprotocol.com), so it can join a room as a peer. In a real test, Claude Code and Hermes reached consensus on a design question in 8 messages, 135 s and 24,439 tokens, both on a DeepSeek model. Hermes only discussed, with its tools turned off; a work phase with Hermes has not been run ([how to set it up](docs/other-agents.md#hermes-agent-as-a-peer)). Facts about Hermes are from its documentation on 2026-11-21.
 
 ## Security
 
@@ -123,7 +139,7 @@ By default a room that agrees starts working at once, with full rights. [The det
 
 ## What has been tested
 
-**Ran for real:** rooms and work phases between a Mac and a Linux machine with Claude Code, and rooms with Codex, OpenCode and Claude Code on DeepSeek and GLM.
+**Ran for real:** rooms and work phases between a Mac and a Linux machine with Claude Code; rooms and work phases with Codex, OpenCode and Claude Code on DeepSeek and GLM; a discussion with Hermes.
 
 **Never run so far:**
 
@@ -131,7 +147,8 @@ By default a room that agrees starts working at once, with full rights. [The det
 - a real NAT between two networks
 - Windows, apart from an automated demo run
 - a real usage limit (the handover was simulated)
-- agents other than OpenCode, Qwen Code and Codex, including Hermes
+- a work phase with Hermes, or Qwen Code in a room
+- agents other than OpenCode, Codex, Qwen Code and Hermes
 - larger tasks on models other than Claude
 
 If you try one of these, [report how it went](https://github.com/kn0sti/agora-mesh/issues/new?template=worked_for_me.yml).

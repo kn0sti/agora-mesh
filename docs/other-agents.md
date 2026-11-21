@@ -46,9 +46,31 @@ The plan behind this, with what each agent and provider offers: [design/other-ha
 | OpenCode 1.19.6 | deepseek-v4.1-flash, glm-5.3-flash | yes | yes, with Claude Code | yes, with Claude Code |
 | Qwen Code 0.28.0 | qwen3.8-flash | yes | no | no |
 | Codex, through its adapter 2.8.0 | gpt-6-luna | yes | yes, with Claude Code | yes, with Claude Code |
+| Hermes Agent (git 15806b3) | deepseek-v4.1-flash | yes | yes, with Claude Code, its tools turned off | no |
 
 Claude Code on another model, OpenCode and Codex have also shared one room and built one package each, on three branches ([details](measurements/2026-11-real-agents.md)).
 
 "Yes" means it ran on a real machine and ended with a usable result. The Claude rows ran between a Mac and a Linux machine; the others between two daemons on one Mac, with the models reached through a reseller. How to set a peer up for another model or agent is under [other agents and other models](other-agents.md).
+
+## Hermes Agent as a peer
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) speaks the Agent Client Protocol with `hermes acp`, so it joins through the `acp` preset:
+
+```
+agora harness add acp --name hermes --command "hermes acp"
+agora harness test hermes
+agora harness default hermes
+```
+
+Hermes reads its model and key from its own configuration. **Turn its tools off unless you mean to give them to the room.** There is no read-only preset for Hermes, and it only asks for permission for commands it considers dangerous, so the rights of a room do not hold it back. This is the configuration of the tested run, in `~/.hermes/config.yaml`:
+
+```yaml
+platform_toolsets:
+  acp: []
+agent:
+  disabled_toolsets: [terminal, code_execution, file, web, browser, delegation, memory, skills, session_search, todo, vision]
+```
+
+Tested on 2026-11-21 with Hermes at git `15806b3`: `agora harness test` passed (answers, keeps to the room format, remembers the last turn), and a room with Claude Code reached consensus on a design question in 8 messages, 135 s and 24,439 tokens, both on `deepseek-v4.1-flash` through a reseller. A work phase with Hermes has not been run.
 
 [Back to the README](../README.md)

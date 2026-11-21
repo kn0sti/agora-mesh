@@ -1,5 +1,7 @@
 # What was measured
 
+**Start here: [what a room costs in tokens](2026-11-token-costs.md)**, 30 real runs with charts and an animation.
+
 **Two agents build a stage of this project.** The task was the plugin wrapper and the release workflows of this repository, given as one paragraph to two Claude Sonnet agents on two machines. [Details and method](2026-11-split-work.md).
 
 | Seconds | |
