@@ -254,8 +254,9 @@ pub fn run(fast: bool, keep: bool) -> Result<()> {
     let style = Style { on: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() };
     let root = std::env::temp_dir().join(format!("agora-demo-{}-{:08x}", std::process::id(), rand::random::<u32>()));
     std::fs::create_dir(&root).with_context(|| format!("creating {}", root.display()))?;
-    // Canonical, because git reports the real path (on macOS the temp dir is a link).
-    let root = root.canonicalize()?;
+    // Canonical, because git reports the real path (on macOS the temp dir is a
+    // link). Not on Windows: there it is a `\\?\` path, which git cannot read.
+    let root = if cfg!(windows) { root } else { root.canonicalize()? };
     let _ = WORKDIR.set(root.clone());
     std::fs::write(root.join("gitconfig"), "[user]\n\tname = agora demo\n\temail = demo@example.invalid\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n")?;
 
@@ -294,7 +295,7 @@ fn play(peers: &[Peer; 2], root: &Path, style: &Style, fast: bool) -> Result<()>
     println!("{}", style.dim("The daemons, the encrypted link, the room and git are real. The agents are scripted: no model, no account, no tokens."));
     println!("{}", style.dim("Everything happens in a temporary folder and is removed afterwards."));
 
-    step(1, "Two machines connect, after a human approved it");
+    step(1, "Two peers connect, both on this machine");
     for p in peers {
         p.command()?.args(["setup", "--name", p.name]).stdout(Stdio::null()).status()?;
     }
@@ -313,10 +314,11 @@ fn play(peers: &[Peer; 2], root: &Path, style: &Style, fast: bool) -> Result<()>
         online(&a.run(&["status"]).unwrap_or_default(), JOINER) && online(&b.run(&["status"]).unwrap_or_default(), OPENER)
     })?;
     b.run(&["trust", OPENER, "--level", "2"])?;
-    println!("  Approved. The link is encrypted end to end, and neither machine is in charge.");
+    println!("  The demo approves it for you. Normally this is your decision.");
+    println!("  The link is encrypted end to end, and neither side is in charge.");
     pause(600);
 
-    step(2, "Each machine has its own clone of the project");
+    step(2, "Each peer has its own clone of the project");
     let origin = root.join("origin.git");
     let (clone_a, clone_b) = (root.join("clone-laptop"), root.join("clone-desktop"));
     let git_in = |dir: &Path, args: &[&str]| a.git(dir, args);
