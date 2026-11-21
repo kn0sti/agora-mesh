@@ -1,6 +1,7 @@
 //! `agora` — command and daemon of agora-mesh. See ARCHITECTURE.md.
 
 mod daemon;
+mod demo;
 mod harness;
 mod memory;
 mod project;
@@ -41,6 +42,15 @@ enum Cmd {
         /// Name other peers see, for example "MacBook"
         #[arg(long)]
         name: String,
+    },
+    /// See a whole room on this machine: no account, no tokens, nothing left behind
+    Demo {
+        /// Do not pause between the steps
+        #[arg(long)]
+        fast: bool,
+        /// Keep the temporary folder to look at it afterwards
+        #[arg(long)]
+        keep: bool,
     },
     /// Run the daemon in the foreground
     Daemon,
@@ -306,8 +316,13 @@ fn cwd() -> String {
 }
 
 fn main() -> Result<()> {
+    // `agora demo` starts this binary in place of `claude`.
+    if demo::is_agent() {
+        return demo::agent();
+    }
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Demo { fast, keep } => demo::run(fast, keep),
         Cmd::Setup { name } => setup(&name),
         Cmd::Daemon => tokio::runtime::Runtime::new()?.block_on(daemon::run()),
         Cmd::Stop => stop(),

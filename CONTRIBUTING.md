@@ -22,6 +22,7 @@ tests/e2e-rooms.sh             # rooms, budgets, work phase, takeover
 tests/e2e-memory.sh            # shared memory
 tests/e2e-everyday.sh          # ask, delegate, review, peers, late joiners, lost peers
 tests/e2e-harness.sh           # harness profiles: other model services, other agents (needs python3)
+tests/e2e-demo.sh              # agora demo: finishes, leaves nothing behind, survives Ctrl-C
 ```
 
 The end-to-end scripts start two or three daemons on one machine and need network access, because the daemons find each other through iroh's public servers. They use no tokens: `tests/fake-claude.sh` stands in for Claude and answers from a script. Its switches (`FAKE_STUBBORN`, `FAKE_ASK`, `FAKE_SPLIT`, `FAKE_LIMIT`, `FAKE_DELAY`) are described at the top of the file. `tests/fake-acp.py` does the same for an agent that speaks the Agent Client Protocol.
@@ -35,7 +36,7 @@ AGORA_HOME=/tmp/b target/debug/agora setup --name B
 
 `AGORA_CLAUDE_ARGS="--model haiku"` keeps real sessions cheap while testing. The other environment variables are listed in `ARCHITECTURE.md`, section 2.
 
-The figures in the README, the animation included, are drawn by `python3 docs/img/make_figures.py` (needs matplotlib and Pillow) from the numbers in `docs/measurements`. Change the numbers there and in the script together, and look at the images before committing them.
+The figures in the README, the animation included, are drawn by `python3 docs/img/make_figures.py` (needs matplotlib and Pillow) from the numbers in `docs/measurements`. Change the numbers there and in the script together, and look at the images before committing them. The terminal recording is made by `python3 docs/img/make_demo_gif.py target/release/agora` from a real `agora demo`.
 
 A change to how rooms behave should come with a check in one of the scripts. A claim that something works with real sessions should say so in the pull request, with what was run.
 

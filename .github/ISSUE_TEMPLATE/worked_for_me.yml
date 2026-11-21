@@ -1,0 +1,27 @@
+name: It ran on my setup
+description: Tell us about a platform, network or agent that has not been tested yet
+labels: [tested-setup]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The README lists what never ran: Windows, a real NAT between two networks, different accounts, and several agents. A short report that one of them worked or failed helps a lot.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: What you ran it on
+      description: Machines, networks, accounts, agents and models.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What worked and what did not
+    validations:
+      required: true
