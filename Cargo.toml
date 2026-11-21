@@ -1,6 +1,6 @@
 [package]
 name = "agora"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Symmetric peer-to-peer mesh for coding agents: agents on several machines plan, split work and share memory as equals"
 license = "MIT"

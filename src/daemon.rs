@@ -652,28 +652,51 @@ async fn run_link(
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<()> {
-    let mut beat = tokio::time::interval(HEARTBEAT);
-    loop {
-        tokio::select! {
-            msg = tokio::time::timeout(DEAD_AFTER, proto::read_msg(&mut recv)) => {
-                let msg = msg.map_err(|_| anyhow!("no heartbeat for {}s", DEAD_AFTER.as_secs()))??;
-                if !apply(shared, peer, network, tx, msg)? {
-                    return Ok(());
+    // Reading has its own task: `select!` drops the losing branch, and a read
+    // dropped halfway through a frame would lose its bytes and desynchronise the stream.
+    let (frames, mut incoming) = mpsc::channel::<Result<Msg>>(64);
+    let reader = tokio::spawn(async move {
+        loop {
+            let msg = proto::read_msg(&mut recv).await;
+            let ended = msg.is_err();
+            if frames.send(msg).await.is_err() || ended {
+                break;
+            }
+        }
+    });
+    let result: Result<()> = async {
+        let mut beat = tokio::time::interval(HEARTBEAT);
+        let mut heard = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                msg = incoming.recv() => {
+                    let msg = msg.ok_or_else(|| anyhow!("connection lost"))??;
+                    heard = tokio::time::Instant::now();
+                    if !apply(shared, peer, network, tx, msg)? {
+                        return Ok(());
+                    }
+                }
+                out = rx.recv() => {
+                    let Some(out) = out else { return Ok(()) };
+                    let last = matches!(out, Msg::Reject { .. });
+                    proto::write_msg(&mut send, &out).await?;
+                    if last {
+                        let _ = send.finish();
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        return Ok(());
+                    }
+                }
+                _ = beat.tick() => proto::write_msg(&mut send, &Msg::Heartbeat).await?,
+                // Measured from the last message heard, so our own heartbeats do not reset it.
+                _ = tokio::time::sleep_until(heard + DEAD_AFTER) => {
+                    bail!("no heartbeat for {}s", DEAD_AFTER.as_secs());
                 }
             }
-            out = rx.recv() => {
-                let Some(out) = out else { return Ok(()) };
-                let last = matches!(out, Msg::Reject { .. });
-                proto::write_msg(&mut send, &out).await?;
-                if last {
-                    let _ = send.finish();
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    return Ok(());
-                }
-            }
-            _ = beat.tick() => proto::write_msg(&mut send, &Msg::Heartbeat).await?,
         }
     }
+    .await;
+    reader.abort();
+    result
 }
 
 /// Applies one message from a peer. Returns false when the link should end.
@@ -1343,6 +1366,8 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
             };
             let text = arg("text")?;
             shared.sendable(&text)?;
+            let log = room::room_dir(&id).join("log.md");
+            let before = human_entries(&log);
             tx.try_send(RoomEvent::Human(text, extra)).map_err(|_| anyhow!("the room is not taking messages right now"))?;
             // If the room was waiting for this answer, return once it runs again,
             // so a following `agora wait` does not see the old question.
@@ -1351,8 +1376,22 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
                 if paused {
                     let _ = tokio::time::timeout(Duration::from_secs(3), state.changed()).await;
                 }
+                return Ok("Sent.".into());
             }
-            Ok("Sent.".into())
+            // A joined room: the opener decides when the answer counts, and its
+            // copy comes back into this log. Until then a `agora wait` on the
+            // opener's machine would still see the old question.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline {
+                if human_entries(&log) > before {
+                    return Ok("Sent.".into());
+                }
+                if !shared.rooms.lock().unwrap().contains_key(&id) {
+                    return Ok("Sent.".into());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok("Sent. The room has not confirmed it yet; it may be in the middle of a turn.".into())
         }
         "go" | "cancel" => {
             let id = arg("room")?;
@@ -1382,6 +1421,15 @@ async fn waiting_command(shared: &Arc<Shared>, req: &Request) -> Result<String> 
         }
         other => bail!("unknown command: {other}"),
     }
+}
+
+/// How many answers from humans a room's log holds.
+fn human_entries(log: &std::path::Path) -> usize {
+    std::fs::read_to_string(log).map(|l| count_human_entries(&l)).unwrap_or(0)
+}
+
+fn count_human_entries(log: &str) -> usize {
+    log.lines().filter(|l| l.starts_with("[#") && l.ends_with(" (human) · HUMAN]")).count()
 }
 
 /// Waits until a room opened here pauses for a human or closes.
@@ -1673,4 +1721,15 @@ fn status(shared: &Shared) -> String {
         out.push_str(&r);
     }
     out
+}
+
+#[cfg(test)]
+mod say_tests {
+    use super::count_human_entries;
+
+    #[test]
+    fn only_entries_of_humans_are_counted() {
+        let log = "# Room\n[#1 Mac · PROPOSAL · 3 left]\nA\n[#2 Heimserver · NEED_HUMAN · 2 left]\nB\n[#3 Heimserver (human) · HUMAN]\nUse Postgres\n(human) · HUMAN]\n";
+        assert_eq!(count_human_entries(log), 1);
+    }
 }

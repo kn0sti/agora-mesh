@@ -83,6 +83,8 @@ c remember "From the third peer." --title "Third" >/dev/null
 check "its entries reach both others" 'wait_for 15 "a memory | grep -q \"^third .*Laptop\" && b memory | grep -q \"^third .*Laptop\""'
 
 # Room results and running sessions
+# Both sides have to see the link before a room can invite.
+wait_for 40 'a status | grep -q "Heimserver *online" && b status | grep -q "Mac *online"'
 a discuss "Plan the migration" --with Heimserver --turns 3 > "$T/out1" 2>&1
 ROOM="$(ls -t "$T/a/rooms" | head -1)"
 check "a finished room leaves its result in the shared memory of all peers" 'wait_for 10 "b memory show room-$ROOM-plan-the-migration | grep -q \"FINAL: the agreed plan\""'
