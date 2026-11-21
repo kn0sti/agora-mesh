@@ -1,18 +1,16 @@
 # agora-mesh
 
-A peer-to-peer mesh for coding agents. It connects the agents on two or more machines so that they work on one large task together: they plan it, question each other's ideas, split it, and build their parts at the same time, each on its own machine and its own branch.
+**Connect coding agents across your machines so they plan together, split the work, and push to separate git branches.**
 
-It was built for Claude Code and runs best there. A peer can also run Claude Code on another model, or another agent such as Codex or OpenCode.
+You have a laptop and a desktop, each with a coding agent. Today you copy context between them and decide who does what. With agora-mesh you give one task to one of them. The agents brief each other, challenge the plan, divide the work, and each pushes its part to its own branch. You review and merge.
 
-No machine is the master. Every machine keeps its own login. It needs no VPN and no cloud account, and it does not use MCP.
+![Two machines, a laptop running Claude Code and a desktop running Codex, each with its own login and its own git clone. They plan and critique over an encrypted link. Each builds its part on its own branch in your git repository, and you review and merge.](docs/img/overview.png)
 
-![Animation of a room, message by message. Three machines, one running Claude Code on a DeepSeek model, one running OpenCode on a DeepSeek model and one running Codex, exchange thirteen messages: a brief, what the other two know and lack, two answers, a pass, a split of the work, two agreements, the start of the work phase, and three reports that the work is done. At the end each peer has pushed its own branch and main is untouched.](docs/img/room-flow-three.gif)
+- **Works with the agents you already use.** Built for Claude Code. Codex and OpenCode have worked in real rooms too.
+- **Every machine keeps its own login and files.** agora-mesh never sees a login or a key.
+- **Nothing to host.** No VPN, no server of your own, no MCP. Machines connect directly and encrypted. Public [iroh](https://www.iroh.computer) relays help them find each other, and carry the traffic if no direct path exists.
 
-*A room that ran on 2026-11-20, as it happened: three different agents, thirteen messages, 325 seconds, one pushed branch per peer. [The run](docs/measurements/2026-11-real-agents.md).*
-
-> **Status: early development, version 0.6.0.** It installs as a Claude Code plugin with prebuilt binaries for macOS, Linux and Windows. The next section says what was run and what was not; [ARCHITECTURE.md](ARCHITECTURE.md) describes how it is built.
-
-*agora-mesh is an independent community project. It is not affiliated with or endorsed by Anthropic.*
+> **Early development, version 0.6.0.** An independent community project, not affiliated with Anthropic. [What has and has not been tested](#what-has-been-tested).
 
 ## Try it in one minute
 
@@ -33,182 +31,17 @@ Other platforms are on the [releases page](https://github.com/kn0sti/agora-mesh/
 
 ![Terminal recording of agora demo: two machines connect after an approval, brief each other, one criticises the proposed split, they agree, each pushes its own branch, and the two branches merge without a conflict.](docs/img/demo.gif)
 
-The demo starts two real daemons that connect, open a real room and push real git branches. **The agents are scripted**, so it shows how a room runs and not how good a model's plan is. It uses no tokens, works in a temporary folder and removes it afterwards.
+The connection, the room and the git branches are real, **but the agents are scripted**, so it shows the process and not the quality of a model. It uses no tokens and cleans up after itself.
 
-## What it can do, and what it cannot
-
-| It can | It cannot, or not yet |
-|---|---|
-| connect machines directly and encrypted, after a human approved each one | be safe with a peer you do not trust: a connected peer can make your machine run commands |
-| let agents brief each other, discuss under a budget with one of them as the critic of each proposal, and agree or ask you | make a small task cheaper: there one agent alone is faster and uses fewer tokens |
-| split work and do the parts at the same time, one branch per peer, and check every "done" against git: the last commit, pushed or not | review or merge the branches for you; the measured results needed a review |
-| hand a package to another peer when one reaches its usage limit or drops out, and tell the taker what it can fetch from origin and what the last commit said was to come next | move work that was not pushed: it stays on the machine that reached its limit |
-| wait for your go before anyone starts working, on the machine that opened the room and on the one a package lands on | resume a room after the opener's daemon restarted |
-| ask one peer a question, hand it a task, have it review your changes, with the terms on your block list kept out of whatever goes to a peer | catch a paraphrase: the block list finds the terms you named, word for word |
-| keep one memory on all machines, also as notes in an Obsidian vault | start at boot: the daemon starts on demand and with the plugin |
-| run a peer on another model or on another agent | make every agent lean: an agent brings 11,000 to 18,000 tokens per turn of its own |
-
-**Never run so far:** peers on different accounts; Windows; a NAT between two networks; a real usage limit (it was simulated); the model providers' own addresses that the presets point at (everything on other models went through a reseller); agents other than OpenCode, Qwen Code and Codex; a task on other models larger than two small files.
-
-The full list of what is missing is in [ARCHITECTURE.md](ARCHITECTURE.md#12-not-built).
-
-## What it is for
-
-- **Planning something large with several instances of your best model.** `agora discuss "<topic>" --model fable` starts one session per machine on that model. They brief each other, propose, criticise and revise until they agree on a plan, or tell you what you have to decide.
-- **Large tasks, split and done in parallel.** Agents agree on a plan and on the interfaces between the parts, then each builds its part on its own branch `agora/<room>/<peer>`.
-- **Agents that check each other.** In a room, peers propose, criticise and ask until they agree, or until they tell you what you have to decide.
-- **Knowledge that sits on different machines.** Each peer has its own files, its own `CLAUDE.md` and memory, and its own access. A question goes to the machine that can answer it.
-- **A second opinion from another model.** A peer on a cheap model or on another agent takes part in the same room and the same format.
-- **Every machine on its own login.** A room needs no shared account, and the mesh never sees a login or a key. When a peer reaches its usage limit, another takes over its package. [What that means for accounts and plans](#accounts-plans-and-terms).
-- **A shared memory.** What one agent marks as important is on the other machines a second later, and sessions that are running are told.
-
-## Models and agents that ran
-
-| Runs in | Model | A session | A room | A work phase |
-|---|---|---|---|---|
-| Claude Code | Claude Sonnet, Claude Fable | yes | yes | yes |
-| Claude Code, pointed at another model | deepseek-v4.1-flash | yes | yes | yes |
-| | glm-5.3-flash | yes | yes | yes |
-| | qwen3.8-flash | yes | yes, without tools | no |
-| | minimax-m3.1-flash | yes | yes, without tools | no |
-| OpenCode 1.19.6 | deepseek-v4.1-flash, glm-5.3-flash | yes | yes, with Claude Code | yes, with Claude Code |
-| Qwen Code 0.28.0 | qwen3.8-flash | yes | no | no |
-| Codex, through its adapter 2.8.0 | gpt-6-luna | yes | yes, with Claude Code | yes, with Claude Code |
-
-Claude Code on another model, OpenCode and Codex have also shared one room and built one package each, on three branches ([details](docs/measurements/2026-11-real-agents.md)).
-
-"Yes" means it ran on a real machine and ended with a usable result. The Claude rows ran between a Mac and a Linux machine; the others between two daemons on one Mac, with the models reached through a reseller. How to set a peer up for another model or agent is under [other agents and other models](#other-agents-and-other-models).
-
-## Measured
-
-**Two agents build a stage of this project.** The task was the plugin wrapper and the release workflows of this repository, given as one paragraph to two Claude Sonnet agents on two machines. [Details and method](docs/measurements/2026-11-split-work.md).
-
-| Seconds | |
-|---|---|
-| 0 to 49 | briefing, discussion, agreement on the interface between the parts, the split |
-| 49 to 100 | both work at the same time, each in its own clone on its own branch |
-| 108 | summary; two pushed branches, 11 files, no overlap, merged without a conflict |
-
-The room used 889,880 tokens. One agent given the same task alone took 1,163 s and 1,859,692 tokens, but that is not a like-for-like speed-up: it ran far more checks on its own work, and the room's result needed four corrections in review. A room is fast at planning and splitting; its result still needs a review.
-
-**What that means for larger tasks.** The room spent 57 s on briefing, discussion and summary; everything else was work done at the same time. Carried forward as a model, a room is slower than one agent below about two minutes of work and approaches half or a third of the time above it, depending on how much of the work can be split.
-
-![Line chart: minutes until a task is done against the minutes of work in it, for one agent, two peers and three peers. If all of the work can be split, 60 minutes of work take 60, 31 and 21 minutes. If 70 % can be split, they take 60, 40 and 33 minutes. The one measured run, 73 seconds of work done by two peers in 108 seconds, sits near the origin where one agent is still faster.](docs/img/time-model-light.png)
-
-This is a model, not a measurement: it assumes equal packages and leaves out the time to review and merge the branches, which the measured run needed.
-
-**Planning with two instances of the strongest model.** Asked how a small team moves a web shop to another database server without downtime, two Claude Fable sessions went through a proposal, a critique and a revised proposal and reached consensus on an eight-step plan in 49 s, using 248,909 tokens. The critique added what the first proposal lacked: revoking write rights on the old server at cutover, so that a writer nobody thought of fails loudly instead of writing to the wrong database.
-
-**A small task is cheaper alone.** For a design question, a room with three sessions took 104 s and 711,673 tokens where one agent took 34 s and 179,409 ([details](docs/measurements/2026-11-room-with-three-sessions.md)). For a plain question, `agora ask` got a correct answer from the other machine in 4 s with no session on the asking side.
-
-**What a session costs before anyone says anything.** Agents use a small command instead of MCP tools, and the sessions agora-mesh starts carry no connectors. Input tokens of a turn that says one word, on the test machine (`agora bench` measures this on yours):
-
-![Bar chart of the input tokens of one turn: 195,258 for a default headless session with 7 connectors, 23,994 for a session started by agora-mesh, 3,743 for the same without tools.](docs/img/session-cost-light.png)
-
-| Session | Tokens |
-|---|---|
-| default headless session (7 connectors, 188 tools) | 195,258 |
-| session started by agora-mesh, with the built-in tools | 23,994 |
-| the same without tools (`agora discuss --lean`) | 3,743 |
-
-This compares headless sessions. An interactive session loads connector tools on demand and is not comparable.
-
-**Other models and other agents.** The same turn on other harnesses ([Claude Code on other models](docs/measurements/2026-11-claude-code-on-another-service.md), [agents](docs/measurements/2026-11-real-agents.md)):
-
-![Bar chart of the input tokens of one turn that says one word: 344 to 736 for a bare Claude Code session without tools on four other models, 3,743 for Claude Code on Claude without tools, 11,543 for OpenCode, 15,074 for Qwen Code, 17,845 for Codex, 23,994 for Claude Code on Claude with its built-in tools.](docs/img/harness-cost-light.png)
-
-Rooms on these models reached the same kind of result on far fewer tokens, and took longer:
-
-| Room | Messages | Tokens, all peers | Time |
-|---|---|---|---|
-| two Claude Fable sessions plan a migration | 8 | 248,909 | 49 s |
-| DeepSeek and GLM plan a change to a tool, with tools | 8 | 78,379 | 457 s |
-| Qwen and MiniMax agree on a checklist, without tools | 9 | 21,515 | 240 s |
-| Claude Code and OpenCode write a reply to a bug report | 8 | 83,413 | 156 s |
-| DeepSeek and GLM split two small files and build them | 9 | 84,554 | 619 s |
-| Claude Code and OpenCode do the same | 9 | 88,874 | 422 s |
-| Claude Code and Codex do the same | 9 | 278,760 | 190 s |
-
-All of the runs on other models together cost less than one US dollar at the reseller; the Codex runs went on a ChatGPT login. They say that the room's format holds on these models and that the work ends on one branch per peer. They do not say that the plans are as good as Claude's; nobody compared them.
-
-## Shared memory, with Obsidian
-
-![Diagram: three machines, each with Claude Code sessions, an agora daemon and a shared memory of Markdown files. The daemons replicate signed entries between the machines in about a second. One machine's shared memory is connected in both directions with an Obsidian vault.](docs/img/shared-memory-light.png)
-
-Every network has one memory that all its peers keep as plain Markdown files. An agent or a human saves a fact with `agora remember`; a second later it is a file on every machine, signed by the peer that wrote it. Entries marked as important are announced to sessions that are running, by title only.
-
-`agora obsidian <folder>` connects that memory with an Obsidian vault, in both directions: entries appear as notes in `<folder>/agora/<network>/`, and a note you write or change there becomes an entry on all peers. `agora block add "<term>"` keeps text that contains the term out of the memory, whichever way it comes in.
-
-The block list also covers what goes to a peer directly. What you type is refused with the term named: a question, a task, the diff that `agora review` sends along, the topic of a room, what you say in one. What a session writes is replaced on its way out by a line that says so: a contribution to a room, a report on a package, a result. `agora events` on your machine shows when that happened.
-
-It finds the terms you named, word for word and without regard to case. It does not find a paraphrase. It does not look into what a session commits and pushes, and the service a session's model runs on sees whatever that session reads.
-
-## How it works
-
-```
-        Machine A                                   Machine B
- ┌──────────────────────┐                   ┌──────────────────────┐
- │ your agent session   │                   │  (no session needed) │
- │   $ agora discuss …  │                   │                      │
- └──────────┬───────────┘                   └──────────────────────┘
-            │ local socket
- ┌──────────▼───────────┐   encrypted QUIC  ┌──────────────────────┐
- │    agora daemon      │◄─────────────────►│    agora daemon      │
- │  identity · rooms ·  │  direct, or via   │  identity · rooms ·  │
- │  shared memory       │  relay fallback   │  shared memory       │
- └──────────┬───────────┘                   └──────────┬───────────┘
-            │ stdin / stdout                           │ stdin / stdout
- ┌──────────▼───────────┐                   ┌──────────▼───────────┐
- │ room session         │   room messages   │ room session         │
- │ (a fresh agent)      │◄ ─ ─ ─ ─ ─ ─ ─ ─ ►│ (a fresh agent)      │
- └──────────────────────┘                   └──────────────────────┘
-```
-
-1. Each machine runs a small background daemon with its own key pair.
-2. One machine opens a network; others join with the network ID. A human approves every join.
-3. Any peer opens a room for a topic. Each invited daemon starts a fresh session in its own clone of the project, on the agent and model that machine is set up for.
-4. The opener briefs the others; then all take equal turns under a budget until they agree, split the work, or ask a human. Whoever makes a proposal has agreed to it; the room is agreed when every other peer says so. The first peer to answer a proposal is asked to look for its weakest point before it agrees.
-5. If they agreed on a split, each peer does its package on its own branch, at the same time. With `--approve` the room first shows you the split and waits for your go.
-6. The result goes back to the session that asked, and into the shared memory.
-
-## Security: read this first
-
-**A connected peer can make your machine run commands.** Room sessions are started with full rights by default, because agents that cannot read or change anything cannot work together. This applies to the person on the other machine and to anything that person's agent has read, such as a prepared web page. In a test run a session looked into the user's `~/.ssh/config` on its own, to answer a question about a host.
-
-Connect only machines and people you trust with a shell on your computer. Connections are permanent until you revoke the peer.
-
-| | |
-|---|---|
-| `agora trust <name> --rights read` | this peer's sessions here may only read |
-| `agora trust <name> --rights talk` | this peer's sessions here get no tools |
-| `agora trust <name> --work ask` | a work package from a room this peer opened waits for your `agora go` before it is built here |
-| `agora discuss … --approve` | a room you open waits for your go once the peers agreed on a split |
-| `agora revoke <name>` | remove a peer |
-| `agora panic` | stop every room and its session on this machine |
-
-**A go before the work.** By default a room that agreed on a split starts working at once, and a package that lands on your machine is built on arrival. Two switches put a human in between: `agora discuss --approve` on the machine that opens a room, and `agora trust <name> --work ask` on a machine that receives packages from that peer. Until the go nothing is changed anywhere.
-
-Claude Code on Anthropic's service checks what a session does in its `auto` permission mode. Nothing does that on another model or in another agent, so such a peer only reads while a room discusses and gets its tools when the work phase starts. See [other agents and other models](#other-agents-and-other-models) before you let one work.
-
-## Install
-
-Tell your Claude Code
-
-> Install https://github.com/kn0sti/agora-mesh and help me set it up.
-
-or install the plugin yourself in a terminal:
+## Use it on your own project
 
 ```
 claude plugin install agora-mesh --marketplace kn0sti/agora-mesh
 ```
 
-[INSTALL.md](INSTALL.md) has the steps. The first call of `agora` downloads the binary for your platform from the GitHub release and checks it against `SHA256SUMS`. Or build from source with a stable Rust toolchain:
+The plugin adds the `agora` command inside Claude Code, so run the next steps there or ask your agent to. In a plain terminal, use the binary from above. [INSTALL.md](INSTALL.md) has the full steps, and `cargo build --release` builds it from source.
 
-```
-cargo build --release          # binary: target/release/agora
-```
-
-Connect two machines:
+**Connect two machines.** Only connect machines you trust: a connected machine [can run commands on yours](#security).
 
 ```
 agora setup --name MacBook     # once per machine
@@ -218,119 +51,112 @@ agora status                   # both: compare the four words
 agora approve <name>           # machine A
 ```
 
-## Use
+**Start your first room.** Each machine needs a clone of the same repository.
 
-Use the smallest command that does the job. The first four start no session on your machine; only the peer spends tokens.
+```
+# machine B, once: register its clone
+agora project add ~/code/my-app
 
-| Command | |
-|---|---|
-| `agora peers` | who is reachable, what they are working on, which agent and model they run on, how much of their usage limit is used |
-| `agora ask "<question>" --with <peer>` | one question to one peer |
-| `agora delegate "<task>" --with <peer>` | hand a task to a peer; it reports done or blocked |
-| `agora review --with <peer>` | a peer reviews your changes; the diff travels with the request, nothing has to be pushed |
-| `agora discuss "<topic>"` | a room: the peers discuss, and split and do the work if they agree on a split |
+# machine A: open the room
+cd ~/code/my-app
+agora discuss "Add rate limiting to the API" --approve
 
-Inside a git repository these commands are about that project, and every peer works in its own clone (`agora project add` registers one).
+# machine B: accept the invitation
+agora rooms
+agora accept <room>
+```
 
-While a room runs:
+With `--approve` the room shows you the agreed split and waits. `agora go <room>` starts the work.
 
-| Command | |
-|---|---|
-| `agora rooms`, `agora watch <room>` | list rooms and invitations; follow one live |
-| `agora accept <room>` | take an invitation, unless `agora trust <name> --level 2` lets that peer's invitations through |
-| `agora say <room> "<text>"` | say something as a human, or answer when the agents ask you |
-| `agora wait <room>` | the result of a room that paused for your answer |
-| `agora invite <room> <peer>` | bring another peer into the running room |
-| `agora discuss … --model fable` | the model every Claude session of the room uses; default is each machine's own |
-| `agora discuss … --turns N --tokens N --lean` | turns per peer; token budget; discuss without tools |
-| `agora discuss … --approve` | wait for your go once the peers agreed on a split, before anyone starts working |
-| `agora go <room>` | start the work as agreed; on a machine a package waits on: build it |
-| `agora say <room> "<what to change>"` | instead of the go: send the split back to the peers |
-| `agora cancel <room>` | close the room without the work; on a machine a package waits on: refuse it |
-| `agora discuss … --work-minutes N --work-tokens N` | minutes one package may take (60); tokens of the work phase after which no further package starts |
+**Use a clean clone.** The agents work directly in it and switch its branch, so do not point them at the folder you are editing in.
 
-The shared memory and what happened:
+## When it helps
 
-| Command | |
-|---|---|
-| `agora remember "<text>" --title "<title>" --importance high` | save a fact on all peers |
-| `agora memory`, `agora memory show <id>`, `agora forget <id>` | list, read, remove |
-| `agora block add "<term>"` | never let this text leave this machine: not into the shared memory, and not to a peer in a question, a task, a diff or a room |
-| `agora obsidian <folder>` | connect the memory with an Obsidian vault, in both directions |
-| `agora events`, `agora notify '<command>'` | what happened; run a command for every event, for example to message your phone |
-| `agora stats`, `agora bench` | what the rooms cost; what a session costs on this machine |
-| `agora harness` | which agent and which model this machine's sessions run on, see below |
+- **The task is too big for one session.** Each agent has its own context and works on its own part at the same time.
+- **The knowledge is on different machines.** Each agent can use the files, tools and access of its own machine.
+- **You want a second opinion.** Put two strong models on one plan, or a different agent next to yours, and let them argue before anything is built.
+- **You want one memory everywhere.** Notes an agent saves appear on all your machines as Markdown, and [can sync with Obsidian](docs/shared-memory.md).
 
-## Other agents and other models
+**When it does not help:** small tasks. A room costs more tokens and time than one agent. In one measured design question, a room of three used 712k tokens in 104 s, one agent alone 179k tokens in 34 s.
 
-A peer does not have to run Claude Code on a Claude model. Each machine chooses a **harness profile** for its own sessions; a room does not care which one a peer is on.
+## What happens in a room
 
-| | Example | What runs |
+![The five steps of a room: brief, propose, critique, agree or ask you, build. The critique can send the plan back for revision. Every room has a budget, and if the agents cannot agree it stops and tells you where they differ.](docs/img/room-steps.png)
+
+In a real test run (three daemons on one Mac), three different agents exchanged 13 messages in 325 s and pushed one branch each, leaving `main` untouched ([full log](docs/measurements/2026-11-real-agents.md)).
+
+![Animation of a real room, message by message. Three peers, one running Claude Code on a DeepSeek model, one running OpenCode on a DeepSeek model and one running Codex, exchange thirteen messages: a brief, what the other two know and lack, two answers, a pass, a split of the work, two agreements, the start of the work phase, and three reports that the work is done. At the end each peer has pushed its own branch and main is untouched.](docs/img/room-flow-three.gif)
+
+## agora-mesh or Hermes Agent?
+
+They do different jobs.
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research is a personal agent that grows with you: it builds memory and skills, runs scheduled jobs, and talks to you in Telegram, Discord or Slack. If you want one assistant that knows you, use Hermes.
+
+agora-mesh does not replace that. It connects existing agents across machines so they can work on one task as equals.
+
+| | agora-mesh | Hermes Agent |
 |---|---|---|
-| Claude Code on another model service | `agora harness add deepseek --key file:~/.keys/deepseek` | Claude Code, pointed at the service's Anthropic-compatible address. Presets: `deepseek`, `glm`, `kimi`, `minimax`, `qwen`, `openrouter`, `ollama`, `lmstudio`, and `anthropic-compatible` for any other. |
-| Another coding agent | `agora harness add opencode` | An agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com). Presets: `opencode`, `gemini`, `qwen-code`, `kimi-code`, `goose`, `cline`, `copilot`, `cursor`, `minimax-code`, `kiro`, `vibe`, `codex-acp`, and `acp` for any other. |
+| **What it is** | a link between separate agents | one persistent personal and coding agent |
+| **Parallel work** | agents on different machines, one branch each | helper agents under one parent, or a task board across profiles |
+| **Several machines** | each runs its own agent, login and clone | one agent can run commands remotely over SSH or in sandboxes; its task board is [single-host by design](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban) |
+| **Memory and skills that grow** | a shared notebook, no learning | its main strength |
+| **Chat apps, scheduled jobs** | no | yes |
 
-```
-agora harness presets            # what `add` knows
-agora harness test deepseek      # two real turns: does it answer, keep to the room's format, report tokens?
-agora harness default deepseek   # this machine's sessions now run on it
-agora bench --harness deepseek   # what one turn costs there
-agora peers                      # shows which harness each peer runs on
-```
+Hermes can speak the [Agent Client Protocol](https://agentclientprotocol.com), which agora-mesh uses for other agents, so it may work as a peer. **We have not tested that yet.** Facts about Hermes are from its documentation on 2026-11-21.
 
-Of the two ways, Claude Code on another model is the lean one: it starts bare and reads a few hundred tokens per turn, where an agent brings its own system prompt and tools.
+## Security
 
-![Bar chart of the size of one request that Claude Code sends to another model service. Started the usual way: 17,259 bytes without tools and 57,118 with tools. Started bare, as agora-mesh does: 2,189 and 5,539 bytes. The usual way also sent a CLAUDE.md from above the project, the path of the home directory, some 85 permission rules, the state of the repository and nine of twelve tools.](docs/img/what-leaves-light.png)
+**A connected machine can make yours run commands.** Agents need that to work together. This applies to whoever controls the other machine and to anything their agent reads, including web pages or files with a prompt injection. **Connect only machines and people you would trust with a shell on your computer.**
 
-Read this before you rely on it:
+![You decide how much runs without you. Agents discuss, plan and split. Two optional gates follow: the opener approves with discuss --approve, and a receiving machine approves with trust --work ask. Then the agents build on their branches. Without the gates a room that agrees starts working right away. agora-mesh does not merge anything.](docs/img/human-gates.png)
 
-- **Presets are from documentation.** The addresses and commands in the presets are what each vendor's documentation said on 2026-11-20. What ran for real is in [the table above](#models-and-agents-that-ran); everything on other models went through a reseller, not through the providers' own addresses. `agora harness test` is there so that you find out on your machine.
-- **Keys.** A profile names where a key comes from (`env:NAME`, `file:PATH` or `cmd:COMMAND`, for example a keychain), never the key. A key for Anthropic in the environment is not passed on to another service.
-- **What a session on another service sends.** Claude Code is started bare there: without `CLAUDE.md` files, memory, hooks and plugins, and never in the `auto` permission mode. Started the usual way it sent a `CLAUDE.md` from above the project, the path of the home directory, the user's permission rules and the state of the repository with every request. What still goes out besides the conversation is an identifier of the installation. The price: such a session reads no `CLAUDE.md` at all, also not the project's, and has the tools `Bash`, `Edit` and `Read` only.
-- **Working needs a decision.** A session on another service can discuss, read, run read-only commands and use the shared memory. It cannot change files, so it cannot finish a work package. `--permission-mode bypassPermissions` on `agora harness add` lets it work, and then every command that model writes runs unchecked.
-- **Why such a peer only reads while a room discusses.** Given tools and no check, two models did their packages during the discussion and pushed to `main`, also after the rules of the room told them not to. So every harness except Claude Code on Anthropic's service discusses with reading rights and does its package in a second session that starts with the work phase. After that change the same models ended with one branch per peer and `main` untouched.
-- **Rights of an agent.** The rights of a room (everything, reading only, nothing) reach an agent in two ways: its requests for permission are answered from them, and for OpenCode, Qwen Code and Codex the preset puts the agent into its own read-only mode. OpenCode used its tools without asking in a real run, and Codex tried to start its package during the discussion and was stopped by its read-only mode. For an agent without such a preset the rights are only as strict as the agent asks.
-- **Tokens.** An agent that does not report its tokens is counted by its context size or by text length, and `agora stats` says so. No harness but Claude Code on Anthropic's service reports how full a usage limit is.
-- **Where your prompts go.** A profile on an outside service is marked external, and everything its sessions read is sent there. A file `.agora/no-external` in a project keeps such sessions out of it on that machine. What is said in a room reaches the service of every peer in it; `agora peers` shows who is external.
-- **Errors that look like answers.** A reseller answered one model's requests with a sentence saying that the key may not use that model, sent as an ordinary answer. Nothing can tell such a sentence from a contribution; it went into the room until the other model asked for a human.
-- **Terms of the providers.** Flat-rate coding plans of most providers exclude automated use; keys billed by usage do not. Anthropic documents pointing Claude Code at another address and says it does not support other models there.
+| Command | What it does |
+|---|---|
+| `agora discuss … --approve` | wait for your go before any work starts |
+| `agora trust <name> --work ask` | work from this peer waits for your go on this machine |
+| `agora trust <name> --rights read` | this peer's sessions here may only read (`talk`: no tools at all) |
+| `agora revoke <name>` | remove a peer |
+| `agora panic` | stop every room and session on this machine |
 
-The plan behind this, with what each agent and provider offers: [docs/design/other-harnesses.md](docs/design/other-harnesses.md).
+By default a room that agrees starts working at once, with full rights. [The details](docs/security.md).
 
-## Accounts, plans and terms
+## What has been tested
 
-![Diagram: three machines, each with its own login and its own usage meter, feed one room in which the agents brief each other, discuss, agree on a plan and split the work. The result is a plan or one branch per peer.](docs/img/own-accounts-light.png)
+**Ran for real:** rooms and work phases between a Mac and a Linux machine with Claude Code, and rooms with Codex, OpenCode and Claude Code on DeepSeek and GLM.
 
-Peers do not share a login. Each machine uses the login its agent already has, and the mesh never sees a login or a key: it only starts the program that is installed there.
+**Never run so far:**
 
-- **Separate context windows.** Every session has its own, so a large task does not have to fit into one.
-- **A peer at its limit hands over.** `agora peers` shows how much of its usage limit each Claude peer has used; when one reaches it in the middle of the work, its package moves to a peer that has capacity left.
-- **Machines on the same account share one limit.** Two machines on one Claude account are two sessions on one allowance.
-- **It does not make usage cheaper.** Agents that discuss use more tokens in total than one agent alone.
+- two different accounts in one room
+- a real NAT between two networks
+- Windows, apart from an automated demo run
+- a real usage limit (the handover was simulated)
+- agents other than OpenCode, Qwen Code and Codex, including Hermes
+- larger tasks on models other than Claude
 
-**Is this within the terms of your Claude plan?** That is yours to check; this is how the published terms read on 2026-11-20, not legal advice.
+If you try one of these, [report how it went](https://github.com/kn0sti/agora-mesh/issues/new?template=worked_for_me.yml).
 
-- agora-mesh runs the unmodified Claude Code, and every user signs in themselves through Anthropic's own login. It collects, stores and forwards no credentials. Anthropic's [legal page for Claude Code](https://code.claude.com/docs/en/legal-and-compliance) says its rules do not prevent "an end user from signing in to the unmodified Claude Code binary with their own Claude subscription".
-- **Your own machines on your own account:** nothing in the pages read speaks against it.
-- **Several people in one room, each on their own account:** a grey area. The [consumer terms](https://www.anthropic.com/legal/consumer-terms) say you may not "make your Account available to anyone else", and the legal page says that the limits of the plans "assume ordinary, individual usage". A request from another person's peer makes your account do work. The same page says Anthropic may enforce its rules without notice.
-- **Getting around a limit by adding accounts** is not what this is built for.
-- **Outside that question:** a peer that uses an API key, or another model, is not a consumer plan at all.
+## Everyday commands
 
-Peers on different accounts have not been run; every run so far had both machines on one account.
+| Command | What it does |
+|---|---|
+| `agora peers` | who is online and what they are doing |
+| `agora ask "<question>"` | ask another machine's agent one question |
+| `agora delegate "<task>"` | hand a task to another machine |
+| `agora review` | have another agent review your changes |
+| `agora discuss "<topic>"` | open a room: plan, split and build together |
+| `agora watch <room>` | follow a room live |
 
-## Compared with
+[All commands](docs/commands.md).
 
-| | agora-mesh | Built-in cross-session messaging | MCP-based peer tools | Agent teams |
-|---|---|---|---|---|
-| Across machines | yes | yes, with Remote Control | varies | no |
-| A login per machine | yes | no, same account | varies | no |
-| Other agents and models as peers | yes | no | varies | no |
-| Traffic path | direct, relay fallback | Anthropic servers | varies | local |
-| Tool schemas in context | none | built-in | yes | built-in |
-| Shared memory | yes | no | some | task list |
-| Equal peers | yes | yes | varies | lead and teammates |
+## Learn more
 
-Ideas and questions: [Discussions](https://github.com/kn0sti/agora-mesh/discussions). Two things in version 0.5.0 came from comments: the critic, and a handover that reads from origin. Development and tests: [CONTRIBUTING.md](CONTRIBUTING.md).
+- [How it works](docs/how-it-works.md) and the full [architecture](ARCHITECTURE.md)
+- [Other agents and models](docs/other-agents.md), including what has actually run
+- [What was measured](docs/measurements/README.md), with the honest comparisons
+- [Accounts, plans and terms](docs/accounts-and-terms.md): read this before you share a room with someone else
+- [Compared with other ways to connect sessions](docs/compared.md)
+- [Contributing](CONTRIBUTING.md) and [discussions](https://github.com/kn0sti/agora-mesh/discussions)
 
 ## License
 
